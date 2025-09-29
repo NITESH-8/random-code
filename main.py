@@ -446,7 +446,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Toggle button
 		toggle_row = QtWidgets.QHBoxLayout()
 		self.view_data_btn = QtWidgets.QPushButton("Show Log")
-		self.view_data_btn.clicked.connect(self._open_log_dialog)
+		self.view_data_btn.clicked.connect(self._on_show_log_clicked)
 		toggle_row.addWidget(self.view_data_btn)
 		toggle_row.addStretch(1)
 		values_layout.addLayout(toggle_row)
@@ -1793,6 +1793,71 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				pass
 		append_timer.timeout.connect(_append_new)
 		append_timer.start()
+		d.exec()
+
+	def _on_show_log_clicked(self) -> None:
+		"""Show the Linux stress tool status file in a live dialog from UART."""
+		self._open_remote_status_dialog()
+
+	def _open_remote_status_dialog(self) -> None:
+		"""Open a dialog that periodically reads /stress_tools/stress_tool_status.txt over UART.
+
+		Reads via the Access UART so output appears in the same console as well.
+		"""
+		# Ensure UART is connected
+		if not hasattr(self, 'comm_console') or not self.comm_console.uart_connect_btn.isChecked():
+			QtWidgets.QMessageBox.warning(self, "UART Not Connected", "Please connect to the Linux UART first.")
+			return
+		path = "/stress_tools/stress_tool_status.txt"
+		d = QtWidgets.QDialog(self)
+		d.setWindowTitle("Stress Tool Status")
+		d.resize(900, 600)
+		v = QtWidgets.QVBoxLayout(d)
+		# Toolbar row
+		row = QtWidgets.QHBoxLayout()
+		row.addWidget(self._make_label("Linux file:"))
+		path_lbl = QtWidgets.QLabel(path)
+		row.addWidget(path_lbl)
+		row.addStretch(1)
+		btn_close = QtWidgets.QPushButton("Close")
+		btn_close.clicked.connect(d.accept)
+		row.addWidget(btn_close)
+		v.addLayout(row)
+		# Text area
+		text = QtWidgets.QPlainTextEdit()
+		text.setReadOnly(True)
+		text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+		mono = QtGui.QFont("Consolas", 10)
+		text.setFont(mono)
+		v.addWidget(text, 1)
+		# Poller: send cat with markers, then parse from console log
+		begin_tok = "__STS_BEGIN__"
+		end_tok = "__STS_END__"
+		def _update_from_console_log() -> None:
+			try:
+				buf = self.comm_console.log.toPlainText() if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log') else ""
+				start = buf.rfind(begin_tok)
+				end = buf.rfind(end_tok)
+				if start != -1 and end != -1 and end > start:
+					content = buf[start + len(begin_tok):end].strip()
+					text.setPlainText(content)
+					text.moveCursor(QtGui.QTextCursor.End)
+			except Exception:
+				pass
+		def _poll_status_once() -> None:
+			try:
+				cmd = f"printf '{begin_tok}\\n'; cat {path} 2>/dev/null; printf '\\n{end_tok}\\n'"
+				self.comm_console.send_commands([cmd], spacing_ms=100)
+				QtCore.QTimer.singleShot(400, _update_from_console_log)
+			except Exception:
+				pass
+		# Timer to periodically refresh
+		poll_timer = QtCore.QTimer(d)
+		poll_timer.setInterval(1500)
+		poll_timer.timeout.connect(_poll_status_once)
+		poll_timer.start()
+		# Initial fetch
+		_poll_status_once()
 		d.exec()
 
 	def _parse_stress_output(self, output: str) -> None:
