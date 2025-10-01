@@ -1853,13 +1853,32 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					text_raw = buf.decode(errors='ignore') if buf else ""
 					# Keep only content before the end tag
 					text_raw = text_raw.split(end_tag)[0]
+					# Drop a possible first echoed command line entirely
+					first_nl = text_raw.find('\n')
+					if first_nl != -1:
+						first_line = text_raw[:first_nl].strip()
+						if first_line.startswith('cd /; cd stress_tools; cat stress_tool_status.txt'):
+							text_raw = text_raw[first_nl + 1:]
 					# If the file is missing, cat prints an error we can detect
 					if "No such file or directory" in text_raw:
 						QtWidgets.QMessageBox.critical(self, "File Not Found", "File does not exist: stress_tool_status.txt")
 						d.reject()
 						return
-					# Remove common echo line if present (starts with 'cat ')
-					lines = [ln for ln in text_raw.splitlines() if not ln.strip().startswith('cat ')]
+					# Remove echoed shell commands and sentinel
+					def _is_echo(line: str) -> bool:
+						ls = line.strip()
+						if not ls:
+							return False
+						if ls.startswith('cd '):
+							return True
+						if ls.startswith('echo __EOF__'):
+							return True
+						if ls.startswith('cat stress_tool_status.txt'):
+							return True
+						if ls.startswith('stty -echo') or ls.startswith('stty echo'):
+							return True
+						return False
+					lines = [ln for ln in text_raw.splitlines() if not _is_echo(ln)]
 					# Remove likely shell prompts (ending with '# ' or '$ ')
 					clean = []
 					for ln in lines:
