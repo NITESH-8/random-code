@@ -1781,31 +1781,27 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				linux_port = None
 		
 		if linux_port:
-			# Open a hidden UART connection independent of the console UI
+			# Open a hidden UART connection independent of the console UI.
+			# If the console is currently occupying the port, temporarily disconnect it.
 			_ser = None
 			_reopen_console_after = False
+			console_was_connected = False
 			try:
-				_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=1, write_timeout=2)
-			except Exception as e:
-				# If port is busy and console holds it, temporarily disconnect console and retry
-				msg = str(e).lower()
+				console_was_connected = bool(self.comm_console.uart_connect_btn.isChecked()) and ((getattr(self.comm_console, '_current_port', '') or '') == linux_port)
+			except Exception:
+				console_was_connected = False
+			if console_was_connected:
 				try:
-					console_has_port = (
-						hasattr(self, 'comm_console') and self.comm_console is not None and
-						self.comm_console.uart_connect_btn.isChecked() and
-						(getattr(self.comm_console, '_current_port', '') or '') == linux_port
-					)
+					self.comm_console._uart_disconnect_if_needed()
+					QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
+					time.sleep(0.3)
+					_reopen_console_after = True
 				except Exception:
-					console_has_port = False
-				if console_has_port and ("denied" in msg or "busy" in msg or "resource" in msg or isinstance(e, PermissionError)):
-					try:
-						self.comm_console._uart_disconnect_if_needed()
-						QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-						time.sleep(0.3)
-						_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=1, write_timeout=2)
-						_reopen_console_after = True
-					except Exception:
-						_ser = None
+					pass
+			try:
+				_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=2, write_timeout=2)
+			except Exception:
+				_ser = None
 			
 			def _close_ser():
 				try:
@@ -1830,19 +1826,20 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					QtWidgets.QMessageBox.critical(self, "Linux UART Not Available", "Couldn't open the UART port for reading. Please close the console and try again.")
 					return
 				try:
-					# Clear any stale bytes, then request full file and mark an end sentinel
+					# Clear any stale bytes, then request full file and mark an end sentinel.
+					# Disable local echo to avoid command being reflected.
 					try:
 						ser_obj.reset_input_buffer()
 					except Exception:
 						pass
 					end_tag = "__EOF__"
-					cmd = "cd /; cd stress_tools; cat stress_tool_status.txt; echo __EOF__\n"
+					cmd = "stty -echo 2>/dev/null; cd /; cd stress_tools; cat stress_tool_status.txt; echo __EOF__; stty echo 2>/dev/null\n"
 					ser_obj.write(cmd.encode())
 					# Read until we see the end tag or timeout
 					buf = b""
-					deadline = time.time() + 4.0
+					deadline = time.time() + 6.0
 					while time.time() < deadline:
-						chunk = ser_obj.read(getattr(ser_obj, 'in_waiting', 0) or 128)
+						chunk = ser_obj.read(256)
 						if chunk:
 							buf += chunk
 							if end_tag.encode() in buf:
@@ -1874,6 +1871,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						if ls.startswith('echo __EOF__'):
 							return True
 						if ls.startswith('cat stress_tool_status.txt'):
+							return True
+						if ls.startswith('stty -echo') or ls.startswith('stty echo'):
 							return True
 						if ls.startswith('stty -echo') or ls.startswith('stty echo'):
 							return True
