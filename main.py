@@ -1797,25 +1797,52 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			d.finished.connect(_close_ser)
 			
 			def _fetch_remote_once() -> None:
-				if _ser is None:
+				# Prefer hidden session; if unavailable, fallback to existing console session
+				use_console_serial = False
+				ser_obj = _ser
+				if ser_obj is None:
+					try:
+						if (hasattr(self, 'comm_console') and 
+							self.comm_console is not None and 
+							self.comm_console.uart_connect_btn.isChecked() and 
+							getattr(self.comm_console, '_serial', None) is not None and 
+							(getattr(self.comm_console, '_current_port', '') or '') == linux_port):
+							ser_obj = self.comm_console._serial
+							use_console_serial = True
+					except Exception:
+						ser_obj = None
+				if ser_obj is None:
 					return
 				try:
 					# Clear any stale bytes, then request full file and mark an end sentinel
-					_ser.reset_input_buffer()
+					try:
+						ser_obj.reset_input_buffer()
+					except Exception:
+						pass
 					end_tag = "__EOF__"
 					cmd = "cd /; cd stress_tools; cat stress_tool_status.txt; echo __EOF__\n"
-					_ser.write(cmd.encode())
+					ser_obj.write(cmd.encode())
 					# Read until we see the end tag or timeout
 					buf = b""
 					deadline = time.time() + 4.0
 					while time.time() < deadline:
-						chunk = _ser.read(_ser.in_waiting or 64)
-						if chunk:
-							buf += chunk
-							if end_tag.encode() in buf:
+						if use_console_serial:
+							# Data is consumed by console poller; read from its buffer instead
+							port = self.comm_console.uart_port_combo.currentText()
+							text_raw = self.comm_console._port_logs.get(port, "")
+							if end_tag in text_raw:
+								buf = text_raw.encode(errors='ignore')
 								break
-						else:
 							QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
+							time.sleep(0.1)
+						else:
+							chunk = ser_obj.read(getattr(ser_obj, 'in_waiting', 0) or 64)
+							if chunk:
+								buf += chunk
+								if end_tag.encode() in buf:
+									break
+							else:
+								QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
 					# Decode and strip shell echoes/prompt and the end tag
 					text_raw = buf.decode(errors='ignore') if buf else ""
 					# Keep only content before the end tag
