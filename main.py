@@ -1797,18 +1797,22 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			d.finished.connect(_close_ser)
 			
 			def _fetch_remote_once() -> None:
-				# Prefer hidden session; if unavailable, fallback to existing console session
-				use_console_serial = False
+				# Always prefer hidden session; if not available, try to temporarily borrow
+				# the console serial WITHOUT echoing to its UI by pausing its poller.
 				ser_obj = _ser
+				poll_was_active = False
 				if ser_obj is None:
 					try:
-						if (hasattr(self, 'comm_console') and 
-							self.comm_console is not None and 
-							self.comm_console.uart_connect_btn.isChecked() and 
-							getattr(self.comm_console, '_serial', None) is not None and 
+						if (hasattr(self, 'comm_console') and self.comm_console is not None and
+							self.comm_console.uart_connect_btn.isChecked() and
+							getattr(self.comm_console, '_serial', None) is not None and
 							(getattr(self.comm_console, '_current_port', '') or '') == linux_port):
+							# Pause console polling to avoid printing to UI
+							poll = getattr(self.comm_console, '_poll', None)
+							if poll is not None and poll.isActive():
+								poll.stop()
+								poll_was_active = True
 							ser_obj = self.comm_console._serial
-							use_console_serial = True
 					except Exception:
 						ser_obj = None
 				if ser_obj is None:
@@ -1826,23 +1830,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					buf = b""
 					deadline = time.time() + 4.0
 					while time.time() < deadline:
-						if use_console_serial:
-							# Data is consumed by console poller; read from its buffer instead
-							port = self.comm_console.uart_port_combo.currentText()
-							text_raw = self.comm_console._port_logs.get(port, "")
-							if end_tag in text_raw:
-								buf = text_raw.encode(errors='ignore')
+						chunk = ser_obj.read(getattr(ser_obj, 'in_waiting', 0) or 128)
+						if chunk:
+							buf += chunk
+							if end_tag.encode() in buf:
 								break
-							QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
-							time.sleep(0.1)
 						else:
-							chunk = ser_obj.read(getattr(ser_obj, 'in_waiting', 0) or 64)
-							if chunk:
-								buf += chunk
-								if end_tag.encode() in buf:
-									break
-							else:
-								QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
+							QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
 					# Decode and strip shell echoes/prompt and the end tag
 					text_raw = buf.decode(errors='ignore') if buf else ""
 					# Keep only content before the end tag
@@ -1877,6 +1871,19 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						text.setPlainText(new_text)
 				except Exception:
 					pass
+				finally:
+					# Resume console poller if we paused it, and clear any residual bytes
+					try:
+						if ser_obj is not None:
+							ser_obj.reset_input_buffer()
+					except Exception:
+						pass
+					try:
+						poll = getattr(self.comm_console, '_poll', None)
+						if poll_was_active and poll is not None and not poll.isActive():
+							poll.start()
+					except Exception:
+						pass
 			# Wire refresh and start periodic polling
 			btn_refresh.clicked.connect(_fetch_remote_once)
 			poll_timer = QtCore.QTimer(d)
