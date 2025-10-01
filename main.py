@@ -1807,7 +1807,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					_ser.write(cmd.encode())
 					# Read until we see the end tag or timeout
 					buf = b""
-					deadline = time.time() + 1.8
+					deadline = time.time() + 4.0
 					while time.time() < deadline:
 						chunk = _ser.read(_ser.in_waiting or 64)
 						if chunk:
@@ -1817,7 +1817,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						else:
 							QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
 					# Decode and strip shell echoes/prompt and the end tag
-					text_raw = buf.decode(errors='ignore')
+					text_raw = buf.decode(errors='ignore') if buf else ""
 					# Keep only content before the end tag
 					text_raw = text_raw.split(end_tag)[0]
 					# If the file is missing, cat prints an error we can detect
@@ -1835,9 +1835,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 							continue
 						clean.append(ln)
 					new_text = "\n".join(clean).rstrip("\r\n")
-					# Append-only update to preserve scroll position
+					# If nothing was read, keep previous content
+					if not new_text:
+						return
+					# Append-only update to preserve scroll position when possible
 					prev = text.toPlainText()
-					if new_text.startswith(prev):
+					if new_text.startswith(prev) and len(new_text) >= len(prev):
 						append = new_text[len(prev):]
 						if append:
 							text.moveCursor(QtGui.QTextCursor.End)
@@ -1855,7 +1858,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			poll_timer.start()
 			_fetch_remote_once()
 		else:
-			QtWidgets.QMessageBox.critical(self, "File Not Found", "File does not exist: stress_tool_status.txt")
+			QtWidgets.QMessageBox.critical(self, "Linux UART Not Found", "Couldn't locate a COM port with VID:PID=067B:23A3.")
 			return
 		d.exec()
 
