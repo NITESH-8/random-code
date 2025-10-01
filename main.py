@@ -1781,50 +1781,21 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				linux_port = None
 		
 		if linux_port:
-			# Open a hidden UART connection independent of the console UI.
-			# If the console is currently occupying the port, temporarily disconnect it.
-			_ser = None
-			_reopen_console_after = False
-			console_was_connected = False
+			# Option A: reuse console UART connection; briefly pause its poller while reading.
+			# Ensure console is connected to the Linux port.
 			try:
-				console_was_connected = bool(self.comm_console.uart_connect_btn.isChecked()) and ((getattr(self.comm_console, '_current_port', '') or '') == linux_port)
+				if (not self.comm_console.uart_connect_btn.isChecked()) or ((getattr(self.comm_console, '_current_port', '') or '') != linux_port):
+					self.comm_console.connect_to_port(linux_port, baud=115200)
 			except Exception:
-				console_was_connected = False
-			if console_was_connected:
-				try:
-					self.comm_console._uart_disconnect_if_needed()
-					QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-					time.sleep(0.3)
-					_reopen_console_after = True
-				except Exception:
-					pass
-			try:
-				_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=2, write_timeout=2)
-			except Exception:
-				_ser = None
-			
-			def _close_ser():
-				try:
-					if _ser is not None:
-						_ser.close()
-				except Exception:
-					pass
-			d.finished.connect(_close_ser)
-			# Optionally restore console connection after dialog closes
-			def _maybe_restore_console():
-				try:
-					if _reopen_console_after and hasattr(self, 'comm_console') and self.comm_console is not None:
-						self.comm_console.connect_to_port(linux_port, baud=115200)
-				except Exception:
-					pass
-			d.finished.connect(_maybe_restore_console)
-			
+				pass
 			def _fetch_remote_once() -> None:
-				# Only use the hidden session to avoid any console echoes
-				ser_obj = _ser
+				ser_obj = getattr(self.comm_console, '_serial', None)
 				if ser_obj is None:
-					QtWidgets.QMessageBox.critical(self, "Linux UART Not Available", "Couldn't open the UART port for reading. Please close the console and try again.")
 					return
+				poll = getattr(self.comm_console, '_poll', None)
+				was_active = bool(poll.isActive()) if poll is not None else False
+				if poll is not None:
+					poll.stop()
 				try:
 					# Clear any stale bytes, then request full file and mark an end sentinel.
 					# Disable local echo to avoid command being reflected.
@@ -1837,9 +1808,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					ser_obj.write(cmd.encode())
 					# Read until we see the end tag or timeout
 					buf = b""
-					deadline = time.time() + 6.0
+					deadline = time.time() + 0.4
 					while time.time() < deadline:
-						chunk = ser_obj.read(256)
+						chunk = ser_obj.read(512)
 						if chunk:
 							buf += chunk
 							if end_tag.encode() in buf:
@@ -1874,8 +1845,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 							return True
 						if ls.startswith('stty -echo') or ls.startswith('stty echo'):
 							return True
-						if ls.startswith('stty -echo') or ls.startswith('stty echo'):
-							return True
 						return False
 					lines = [ln for ln in text_raw.splitlines() if not _is_echo(ln)]
 					# Remove likely shell prompts (ending with '# ' or '$ ')
@@ -1902,13 +1871,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				except Exception:
 					pass
 				finally:
-					# Resume console poller if we paused it, and clear any residual bytes
+					# Resume console poller and clear any residual bytes
 					try:
 						if ser_obj is not None:
 							ser_obj.reset_input_buffer()
 					except Exception:
 						pass
-					# Do not touch the console poller here; we never paused it
+					if poll is not None and was_active and not poll.isActive():
+						poll.start()
 			# Wire refresh and start periodic polling
 			btn_refresh.clicked.connect(_fetch_remote_once)
 			poll_timer = QtCore.QTimer(d)
