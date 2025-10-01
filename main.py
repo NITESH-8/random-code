@@ -446,7 +446,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Toggle button
 		toggle_row = QtWidgets.QHBoxLayout()
 		self.view_data_btn = QtWidgets.QPushButton("Show Log")
-		self.view_data_btn.clicked.connect(self._on_show_log_clicked)
+		self.view_data_btn.clicked.connect(self._open_log_dialog)
 		toggle_row.addWidget(self.view_data_btn)
 		toggle_row.addStretch(1)
 		values_layout.addLayout(toggle_row)
@@ -1747,10 +1747,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		v = QtWidgets.QVBoxLayout(d)
 		# Toolbar row
 		row = QtWidgets.QHBoxLayout()
-		row.addWidget(self._make_label("File:"))
-		path_lbl = QtWidgets.QLabel(self.log_file_edit.text() if hasattr(self, 'log_file_edit') else "")
+		row.addWidget(self._make_label("Source:"))
+		path_lbl = QtWidgets.QLabel("")
 		row.addWidget(path_lbl)
 		row.addStretch(1)
+		btn_refresh = QtWidgets.QPushButton("Refresh")
+		row.addWidget(btn_refresh)
 		btn_close = QtWidgets.QPushButton("Close")
 		btn_close.clicked.connect(d.accept)
 		row.addWidget(btn_close)
@@ -1762,102 +1764,99 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Load current file content
+
+		# If UART is available, fetch the remote file from /stress_tools via a hidden session
+		linux_port: Optional[str] = None
 		try:
-			p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
-			if p and os.path.exists(p):
-				with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-					text.setPlainText(f.read())
+			linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
 		except Exception:
-			pass
-		# Wire live updates: reuse tail to append new lines while dialog open
-		append_timer = QtCore.QTimer(d)
-		append_timer.setInterval(500)
-		def _append_new():
+			linux_port = None
+
+		if linux_port:
+			path_lbl.setText("/stress_tools/stress_tool_status.txt (UART)")
 			try:
-				p2 = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
-				if not p2 or not os.path.exists(p2):
+				import serial
+			except Exception:
+				# Fallback to local view when pyserial is missing
+				linux_port = None
+		
+		if linux_port:
+			# Open a hidden UART connection independent of the console UI
+			_ser = None
+			try:
+				_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=1, write_timeout=2)
+			except Exception:
+				_ser = None
+			
+			def _close_ser():
+				try:
+					if _ser is not None:
+						_ser.close()
+				except Exception:
+					pass
+			d.finished.connect(_close_ser)
+			
+			def _fetch_remote_once() -> None:
+				if _ser is None:
 					return
-				with open(p2, 'rb') as f:
-					f.seek(text.document().characterCount())
-					data = f.read()
-					if data:
-						try:
-							new_txt = data.decode(errors='ignore')
-						except Exception:
-							new_txt = str(data)
-						text.moveCursor(QtGui.QTextCursor.End)
-						text.insertPlainText(new_txt)
-						text.moveCursor(QtGui.QTextCursor.End)
-			except Exception:
-				pass
-		append_timer.timeout.connect(_append_new)
-		append_timer.start()
-		d.exec()
-
-	def _on_show_log_clicked(self) -> None:
-		"""Show the Linux stress tool status file in a live dialog from UART."""
-		self._open_remote_status_dialog()
-
-	def _open_remote_status_dialog(self) -> None:
-		"""Open a dialog that periodically reads /stress_tools/stress_tool_status.txt over UART.
-
-		Reads via the Access UART so output appears in the same console as well.
-		"""
-		# Ensure UART is connected
-		if not hasattr(self, 'comm_console') or not self.comm_console.uart_connect_btn.isChecked():
-			QtWidgets.QMessageBox.warning(self, "UART Not Connected", "Please connect to the Linux UART first.")
+				try:
+					# Clear any stale bytes, then request full file and mark an end sentinel
+					_ser.reset_input_buffer()
+					end_tag = "__EOF__"
+					cmd = "cd /; cd stress_tools; cat stress_tool_status.txt; echo __EOF__\n"
+					_ser.write(cmd.encode())
+					# Read until we see the end tag or timeout
+					buf = b""
+					deadline = time.time() + 1.8
+					while time.time() < deadline:
+						chunk = _ser.read(_ser.in_waiting or 64)
+						if chunk:
+							buf += chunk
+							if end_tag.encode() in buf:
+								break
+						else:
+							QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
+					# Decode and strip shell echoes/prompt and the end tag
+					text_raw = buf.decode(errors='ignore')
+					# Keep only content before the end tag
+					text_raw = text_raw.split(end_tag)[0]
+					# If the file is missing, cat prints an error we can detect
+					if "No such file or directory" in text_raw:
+						QtWidgets.QMessageBox.critical(self, "File Not Found", "File does not exist: stress_tool_status.txt")
+						d.reject()
+						return
+					# Remove common echo line if present (starts with 'cat ')
+					lines = [ln for ln in text_raw.splitlines() if not ln.strip().startswith('cat ')]
+					# Remove likely shell prompts (ending with '# ' or '$ ')
+					clean = []
+					for ln in lines:
+						ls = ln.strip()
+						if ls.endswith('#') or ls.endswith('$'):
+							continue
+						clean.append(ln)
+					new_text = "\n".join(clean).rstrip("\r\n")
+					# Append-only update to preserve scroll position
+					prev = text.toPlainText()
+					if new_text.startswith(prev):
+						append = new_text[len(prev):]
+						if append:
+							text.moveCursor(QtGui.QTextCursor.End)
+							text.insertPlainText(append)
+							text.moveCursor(QtGui.QTextCursor.End)
+					else:
+						text.setPlainText(new_text)
+				except Exception:
+					pass
+			# Wire refresh and start periodic polling
+			btn_refresh.clicked.connect(_fetch_remote_once)
+			poll_timer = QtCore.QTimer(d)
+			poll_timer.setInterval(2000)
+			poll_timer.timeout.connect(_fetch_remote_once)
+			poll_timer.start()
+			_fetch_remote_once()
+		else:
+			QtWidgets.QMessageBox.critical(self, "File Not Found", "File does not exist: stress_tool_status.txt")
 			return
-		path = "/stress_tools/stress_tool_status.txt"
-		d = QtWidgets.QDialog(self)
-		d.setWindowTitle("Stress Tool Status")
-		d.resize(900, 600)
-		v = QtWidgets.QVBoxLayout(d)
-		# Toolbar row
-		row = QtWidgets.QHBoxLayout()
-		row.addWidget(self._make_label("Linux file:"))
-		path_lbl = QtWidgets.QLabel(path)
-		row.addWidget(path_lbl)
-		row.addStretch(1)
-		btn_close = QtWidgets.QPushButton("Close")
-		btn_close.clicked.connect(d.accept)
-		row.addWidget(btn_close)
-		v.addLayout(row)
-		# Text area
-		text = QtWidgets.QPlainTextEdit()
-		text.setReadOnly(True)
-		text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-		mono = QtGui.QFont("Consolas", 10)
-		text.setFont(mono)
-		v.addWidget(text, 1)
-		# Poller: send cat with markers, then parse from console log
-		begin_tok = "__STS_BEGIN__"
-		end_tok = "__STS_END__"
-		def _update_from_console_log() -> None:
-			try:
-				buf = self.comm_console.log.toPlainText() if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log') else ""
-				start = buf.rfind(begin_tok)
-				end = buf.rfind(end_tok)
-				if start != -1 and end != -1 and end > start:
-					content = buf[start + len(begin_tok):end].strip()
-					text.setPlainText(content)
-					text.moveCursor(QtGui.QTextCursor.End)
-			except Exception:
-				pass
-		def _poll_status_once() -> None:
-			try:
-				cmd = f"printf '{begin_tok}\\n'; cat {path} 2>/dev/null; printf '\\n{end_tok}\\n'"
-				self.comm_console.send_commands([cmd], spacing_ms=100)
-				QtCore.QTimer.singleShot(400, _update_from_console_log)
-			except Exception:
-				pass
-		# Timer to periodically refresh
-		poll_timer = QtCore.QTimer(d)
-		poll_timer.setInterval(1500)
-		poll_timer.timeout.connect(_poll_status_once)
-		poll_timer.start()
-		# Initial fetch
-		_poll_status_once()
 		d.exec()
 
 	def _parse_stress_output(self, output: str) -> None:
