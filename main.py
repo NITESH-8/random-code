@@ -1773,7 +1773,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			linux_port = None
 
 		if linux_port:
-			path_lbl.setText("/stress_tools/stress_tool_status.txt (UART)")
+			path_lbl.setText("/stress_tools/stress_tool_status.txt")
 			try:
 				import serial
 			except Exception:
@@ -1797,24 +1797,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			d.finished.connect(_close_ser)
 			
 			def _fetch_remote_once() -> None:
-				# Always prefer hidden session; if not available, try to temporarily borrow
-				# the console serial WITHOUT echoing to its UI by pausing its poller.
+				# Only use the hidden session to avoid any console echoes
 				ser_obj = _ser
-				poll_was_active = False
-				if ser_obj is None:
-					try:
-						if (hasattr(self, 'comm_console') and self.comm_console is not None and
-							self.comm_console.uart_connect_btn.isChecked() and
-							getattr(self.comm_console, '_serial', None) is not None and
-							(getattr(self.comm_console, '_current_port', '') or '') == linux_port):
-							# Pause console polling to avoid printing to UI
-							poll = getattr(self.comm_console, '_poll', None)
-							if poll is not None and poll.isActive():
-								poll.stop()
-								poll_was_active = True
-							ser_obj = self.comm_console._serial
-					except Exception:
-						ser_obj = None
 				if ser_obj is None:
 					return
 				try:
@@ -1878,12 +1862,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 							ser_obj.reset_input_buffer()
 					except Exception:
 						pass
-					try:
-						poll = getattr(self.comm_console, '_poll', None)
-						if poll_was_active and poll is not None and not poll.isActive():
-							poll.start()
-					except Exception:
-						pass
+					# Do not touch the console poller here; we never paused it
 			# Wire refresh and start periodic polling
 			btn_refresh.clicked.connect(_fetch_remote_once)
 			poll_timer = QtCore.QTimer(d)
