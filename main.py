@@ -1783,10 +1783,29 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		if linux_port:
 			# Open a hidden UART connection independent of the console UI
 			_ser = None
+			_reopen_console_after = False
 			try:
 				_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=1, write_timeout=2)
-			except Exception:
-				_ser = None
+			except Exception as e:
+				# If port is busy and console holds it, temporarily disconnect console and retry
+				msg = str(e).lower()
+				try:
+					console_has_port = (
+						hasattr(self, 'comm_console') and self.comm_console is not None and
+						self.comm_console.uart_connect_btn.isChecked() and
+						(getattr(self.comm_console, '_current_port', '') or '') == linux_port
+					)
+				except Exception:
+					console_has_port = False
+				if console_has_port and ("denied" in msg or "busy" in msg or "resource" in msg or isinstance(e, PermissionError)):
+					try:
+						self.comm_console._uart_disconnect_if_needed()
+						QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
+						time.sleep(0.3)
+						_ser = serial.Serial(port=linux_port, baudrate=115200, timeout=1, write_timeout=2)
+						_reopen_console_after = True
+					except Exception:
+						_ser = None
 			
 			def _close_ser():
 				try:
@@ -1795,11 +1814,20 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				except Exception:
 					pass
 			d.finished.connect(_close_ser)
+			# Optionally restore console connection after dialog closes
+			def _maybe_restore_console():
+				try:
+					if _reopen_console_after and hasattr(self, 'comm_console') and self.comm_console is not None:
+						self.comm_console.connect_to_port(linux_port, baud=115200)
+				except Exception:
+					pass
+			d.finished.connect(_maybe_restore_console)
 			
 			def _fetch_remote_once() -> None:
 				# Only use the hidden session to avoid any console echoes
 				ser_obj = _ser
 				if ser_obj is None:
+					QtWidgets.QMessageBox.critical(self, "Linux UART Not Available", "Couldn't open the UART port for reading. Please close the console and try again.")
 					return
 				try:
 					# Clear any stale bytes, then request full file and mark an end sentinel
