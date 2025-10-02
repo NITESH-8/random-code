@@ -39,7 +39,7 @@ class CommConsole(QtWidgets.QWidget):
 		row.setSpacing(8)
 		row.addWidget(QtWidgets.QLabel("Protocol:"))
 		self.proto_combo = QtWidgets.QComboBox()
-		self.proto_combo.addItems(["UART", "SSH", "ADB"])  # Extensible
+		self.proto_combo.addItems(["UART", "SSH", "ADB", "CMD"])  # Extensible
 		self.proto_combo.currentIndexChanged.connect(self._on_proto_changed)
 		row.addWidget(self.proto_combo)
 		row.addStretch(1)
@@ -136,6 +136,19 @@ class CommConsole(QtWidgets.QWidget):
 		adb.addWidget(self.btn_adb_connect)
 		self.proto_stack.addWidget(adb_controls)
 
+		# CMD terminals page (3 tabs, independent terminals) - lazy init
+		cmd_page = QtWidgets.QWidget()
+		cmd_layout = QtWidgets.QVBoxLayout(cmd_page)
+		cmd_layout.setContentsMargins(0, 0, 0, 0)
+		self.cmd_tabs = QtWidgets.QTabWidget()
+		self.cmd_terms: List[TerminalWidget] = []  # type: ignore[var-annotated]
+		placeholder = QtWidgets.QLabel("CMD terminals will start when selected…")
+		placeholder.setAlignment(QtCore.Qt.AlignCenter)
+		cmd_layout.addWidget(self.cmd_tabs)
+		cmd_layout.addWidget(placeholder)
+		self._cmd_placeholder = placeholder
+		self.proto_stack.addWidget(cmd_page)
+
 		# Distinct output log and input box
 		self.log = QtWidgets.QPlainTextEdit()
 		self.log.setReadOnly(True)
@@ -188,10 +201,26 @@ class CommConsole(QtWidgets.QWidget):
 			self._reset_uart_controls(clear_ports=True)
 			self.refresh_ports()
 			self._on_port_changed(self.uart_port_combo.currentText())
-		# When switching to ADB, refresh device list and show host prompt
+		# When switching to ADB, refresh device list (no host prompt)
 		if idx == 2:
 			self._refresh_adb_devices()
-			self._print_host_prompt()
+		# Lazy-create CMD terminals when selected
+		if idx == 3 and not getattr(self, 'cmd_terms', []):
+			try:
+				for i in range(3):
+					term = TerminalWidget(parent=self)
+					self.cmd_terms.append(term)
+					self.cmd_tabs.addTab(term, f"CMD {i+1}")
+				if hasattr(self, '_cmd_placeholder') and self._cmd_placeholder is not None:
+					self._cmd_placeholder.setVisible(False)
+			except Exception:
+				pass
+		# Toggle shared log/input visibility for CMD vs others
+		is_cmd = (idx == 3)
+		if hasattr(self, 'log'):
+			self.log.setVisible(not is_cmd)
+		if hasattr(self, 'input'):
+			self.input.setVisible(not is_cmd)
 
 	def refresh_ports(self) -> None:
 		"""Refresh UART ports list."""
@@ -257,6 +286,430 @@ class CommConsole(QtWidgets.QWidget):
 			self.btn_adb_connect.setText("Connect")
 			if hasattr(self, 'log'):
 				self.log.appendPlainText("[ADB] Disconnected")
+
+		# ===== UART handlers (class methods) =====
+	def _on_uart_connect_toggle(self, checked: bool) -> None:
+		if checked:
+			port = self.uart_port_combo.currentText()
+			try:
+				import serial
+				baud = int(self.uart_baud.currentText() or 115200)
+				bytesize = serial.SEVENBITS if self.uart_databits.currentText() == "7" else serial.EIGHTBITS
+				parity_map = {"None": serial.PARITY_NONE, "Even": serial.PARITY_EVEN, "Odd": serial.PARITY_ODD}
+				parity = parity_map.get(self.uart_parity.currentText(), serial.PARITY_NONE)
+				stop_map = {"1": serial.STOPBITS_ONE, "1.5": serial.STOPBITS_ONE_POINT_FIVE, "2": serial.STOPBITS_TWO}
+				stopbits = stop_map.get(self.uart_stop.currentText(), serial.STOPBITS_ONE)
+				rx = self.uart_flow.currentText()
+				rtscts = (rx == "RTS/CTS")
+				xonxoff = (rx == "XON/XOFF")
+				self._serial = serial.Serial(port=port, baudrate=baud, bytesize=bytesize, parity=parity, stopbits=stopbits, rtscts=rtscts, xonxoff=xonxoff, timeout=0)
+				self.uart_connect_btn.setText("Disconnect")
+				self._poll.start()
+				self._current_port = port
+				self._port_logs.setdefault(port, "")
+				self._current_port = port
+				if hasattr(self, 'log'):
+					self.log.setPlainText(self._port_logs.get(port, ""))
+					self.log.moveCursor(QtGui.QTextCursor.End)
+			except ImportError:
+				QtWidgets.QMessageBox.critical(
+					self,
+					"Serial Module Missing",
+					"pyserial is not installed. Install it with:\n\n  python -m pip install pyserial\n\nThen restart the app."
+				)
+				self.uart_connect_btn.setChecked(False)
+			except Exception as e:
+				msg = str(e)
+				if isinstance(e, PermissionError) or "access is denied" in msg.lower() or "busy" in msg.lower() or "resource busy" in msg.lower():
+					msg = f"Port {port} is busy or access is denied. Close other apps and try again.\n\nDetails: {str(e)}"
+				elif isinstance(e, FileNotFoundError) or "no such file" in msg.lower() or "cannot find the file" in msg.lower():
+					msg = f"Port {port} was not found. Check the device and try again.\n\nDetails: {str(e)}"
+				QtWidgets.QMessageBox.critical(self, "Open Port Failed", msg)
+				self.uart_connect_btn.setChecked(False)
+		else:
+			self._poll.stop()
+			try:
+				if self._serial is not None:
+					self._serial.close()
+					self._serial = None
+			except Exception:
+				pass
+			self.uart_connect_btn.setText("Connect")
+
+	def _on_uart_clear(self) -> None:
+		try:
+			port = self.uart_port_combo.currentText()
+			self._port_logs[port] = ""
+			if hasattr(self, 'log'):
+				self.log.clear()
+		except Exception:
+			pass
+
+	def find_linux_port(self, soc_port_id: Optional[str] = None) -> Optional[str]:
+		try:
+			from serial.tools import list_ports
+			needle = (soc_port_id or self._soc_port_id).strip()
+			candidates: List[str] = []
+			for p in list_ports.comports():
+				try:
+					hwid = getattr(p, 'hwid', '') or ''
+					if needle and needle in hwid:
+						candidates.append(p.device)
+				except Exception:
+					pass
+			if not candidates:
+				return None
+			def _com_num(name: str) -> int:
+				import re
+				m = re.search(r"COM(\d+)$", name.upper())
+				return int(m.group(1)) if m else 1_000_000
+			candidates.sort(key=_com_num)
+			return candidates[0]
+		except Exception:
+			return None
+
+	def connect_to_port(self, port: str, baud: int = 115200) -> bool:
+		try:
+			idx = self.uart_port_combo.findText(port)
+			if idx < 0:
+				self.uart_port_combo.addItem(port)
+				idx = self.uart_port_combo.findText(port)
+			self.uart_port_combo.setCurrentIndex(max(0, idx))
+			self.uart_baud.setCurrentText(str(int(baud)))
+			self.uart_connect_btn.setChecked(True)
+			return bool(self._serial)
+		except Exception as e:
+			QtWidgets.QMessageBox.critical(self, "Open Port Failed", str(e))
+			return False
+
+	def send_commands(self, commands: List[str], spacing_ms: int = 300, on_complete: Optional[Callable[[], None]] = None) -> None:
+		if not commands:
+			if on_complete:
+				on_complete()
+			return
+		queue = list(commands)
+		timer = QtCore.QTimer(self)
+		timer.setInterval(max(50, int(spacing_ms)))
+		def _flush_next():
+			if not queue:
+				timer.stop()
+				if on_complete:
+					on_complete()
+				return
+			cmd = queue.pop(0)
+			try:
+				if self._serial is not None:
+					self._serial.write((cmd + "\n").encode())
+					port = self.uart_port_combo.currentText()
+					self._port_logs[port] = self._port_logs.get(port, "") + cmd + "\n"
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText(cmd + "\n")
+						self.log.moveCursor(QtGui.QTextCursor.End)
+			except Exception:
+				pass
+		timer.timeout.connect(_flush_next)
+		timer.start()
+		_flush_next()
+
+	def disconnect_serial(self) -> None:
+		self._uart_disconnect_if_needed()
+
+	def _uart_disconnect_if_needed(self) -> None:
+		if self.uart_connect_btn.isChecked():
+			self.uart_connect_btn.setChecked(False)
+
+	def _on_port_changed(self, port: str) -> None:
+		try:
+			prev = getattr(self, '_current_port', '')
+			if prev and hasattr(self, 'log'):
+				self._port_logs[prev] = self.log.toPlainText()
+			self._current_port = port
+			if hasattr(self, 'log'):
+				self.log.setPlainText(self._port_logs.get(port, ""))
+				self.log.moveCursor(QtGui.QTextCursor.End)
+		except Exception:
+			pass
+
+	def _reset_uart_controls(self, clear_ports: bool) -> None:
+		if clear_ports:
+			self.uart_port_combo.clear()
+		self.uart_baud.setCurrentText("115200")
+		self.uart_databits.setCurrentText("8")
+		self.uart_parity.setCurrentText("None")
+		self.uart_stop.setCurrentText("1")
+		self.uart_flow.setCurrentText("None")
+
+	def _poll_uart(self) -> None:
+		try:
+			if self._serial is not None and self._serial.in_waiting:
+				data = self._serial.read(self._serial.in_waiting)
+				if data:
+					try:
+						text = data.decode(errors="replace")
+					except Exception:
+						text = str(data)
+					port = self.uart_port_combo.currentText()
+					self._port_logs[port] = self._port_logs.get(port, "") + text
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText(text)
+						self.log.moveCursor(QtGui.QTextCursor.End)
+		except Exception as e:
+			self._poll.stop()
+			try:
+				if self._serial is not None:
+					self._serial.close()
+					self._serial = None
+			except Exception:
+				pass
+			QtWidgets.QMessageBox.warning(self, "Serial Disconnected", f"Serial port error: {str(e)}\nThe connection has been closed.")
+			self.uart_connect_btn.setChecked(False)
+
+	def _on_send(self) -> None:
+		msg = (self.input.toPlainText().rstrip("\r\n").split("\n")[-1] if hasattr(self, 'input') else "")
+		if not msg:
+			return
+		try:
+			idx = self.proto_combo.currentIndex() if hasattr(self, 'proto_combo') else 0
+			# Only handle UART and ADB here; CMD terminals have their own handler
+			if idx not in (0, 2):
+				if hasattr(self, 'input'):
+					self.input.clear()
+				return
+			serial_obj = getattr(self, '_serial', None)
+			if idx == 0 and serial_obj is not None:
+				serial_obj.write((msg + "\n").encode())
+				port = self.uart_port_combo.currentText()
+				self._port_logs[port] = self._port_logs.get(port, "") + msg + "\n"
+				if hasattr(self, 'log'):
+					self.log.moveCursor(QtGui.QTextCursor.End)
+					self.log.insertPlainText("\n")
+					self.log.moveCursor(QtGui.QTextCursor.End)
+				if hasattr(self, 'input'):
+					self.input.clear()
+			elif idx == 2 and self._adb_connected:
+				serial = self._adb_serial
+				code, out, err = adb_shell(serial, msg)
+				if hasattr(self, 'log'):
+					self.log.moveCursor(QtGui.QTextCursor.End)
+					self.log.insertPlainText((out + ("\n" if out else "")) or "")
+					if err:
+						self.log.insertPlainText((err + "\n"))
+					self.log.moveCursor(QtGui.QTextCursor.End)
+				if hasattr(self, 'input'):
+					self.input.clear()
+		except Exception:
+			# Suppress errors from stray focus or non-UART contexts
+			pass
+
+	def eventFilter(self, source, event):  # type: ignore[override]
+		try:
+			if hasattr(self, 'input') and source is self.input and isinstance(event, QtGui.QKeyEvent):
+				if event.type() == QtCore.QEvent.KeyPress and event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+					if event.modifiers() & QtCore.Qt.ShiftModifier:
+						self.input.insertPlainText("\n")
+					else:
+						self._on_send()
+						return True
+		except KeyboardInterrupt:
+			return False
+		except Exception:
+			pass
+		return super().eventFilter(source, event)
+
+
+class TerminalWidget(QtWidgets.QWidget):
+	"""Simple embedded CMD-like terminal using QProcess.
+
+	Starts a hidden cmd.exe (Windows) or bash/sh (other) and wires stdin/stdout to a text view.
+	Enter sends the last line; Shift+Enter inserts newline.
+	"""
+
+	def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+		super().__init__(parent)
+		v = QtWidgets.QVBoxLayout(self)
+		v.setContentsMargins(0, 0, 0, 0)
+		self.view = QtWidgets.QPlainTextEdit()
+		self.view.setReadOnly(True)
+		self.view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+		mono = QtGui.QFont("Consolas", 10)
+		self.view.setFont(mono)
+		v.addWidget(self.view, 1)
+		self.input = QtWidgets.QLineEdit()
+		self.input.returnPressed.connect(self._send)
+		v.addWidget(self.input)
+		# Control row: Run and Clear buttons as a safety path if Enter filter fails
+		ctrl = QtWidgets.QHBoxLayout()
+		btn_run = QtWidgets.QPushButton("Run")
+		btn_run.clicked.connect(self._send)
+		ctrl.addWidget(btn_run)
+		btn_clear = QtWidgets.QPushButton("Clear")
+		btn_clear.clicked.connect(lambda: (self.view.clear(), self._print_prompt()))
+		ctrl.addWidget(btn_clear)
+		ctrl.addStretch(1)
+		v.addLayout(ctrl)
+		# Shortcut: Ctrl+Enter to run
+		QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, activated=self._send)
+		self.proc = None
+		self._is_windows = platform.system().lower().startswith('win')
+		# Start in the user's home directory (like a normal CMD/Bash)
+		if self._is_windows:
+			self.cwd = os.path.expandvars("%USERPROFILE%") or os.path.expanduser("~") or "C:\\"
+		else:
+			self.cwd = os.path.expanduser("~") or "/"
+		if not self._is_windows:
+			self.proc = QtCore.QProcess(self)
+			self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+			self.proc.readyReadStandardOutput.connect(self._on_out)
+			self.proc.readyReadStandardError.connect(self._on_out)
+			self.proc.setWorkingDirectory(self.cwd)
+			self.proc.start("bash")
+		# Print prompt header once ready
+		QtCore.QTimer.singleShot(200, self._print_prompt)
+
+	def _print_prompt(self) -> None:
+		try:
+			if self._is_windows:
+				ver = platform.version()
+				self.view.appendPlainText(f"Microsoft Windows [Version {ver}]")
+				self.view.appendPlainText("(c) Microsoft Corporation. All rights reserved.")
+				self.view.appendPlainText("")
+				self.view.appendPlainText(self.cwd + ">")
+			else:
+				user = os.environ.get('USER') or os.environ.get('USERNAME') or ''
+				host = platform.node()
+				self.view.appendPlainText(f"{user}@{host}:{self.cwd}$")
+		except Exception:
+			pass
+
+	def _on_out(self) -> None:
+		try:
+			data = self.proc.readAllStandardOutput().data()
+			if data:
+				try:
+					text = data.decode(errors='replace')
+				except Exception:
+					text = str(data)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.insertPlainText(text)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+		except Exception:
+			pass
+
+	def _send(self) -> None:
+		msg = self.input.text() if hasattr(self, 'input') else ""
+		if not msg:
+			return
+		try:
+			line = msg.strip()
+			# Intercept adb commands and run via adb_utils for reliability
+			if line.lower().startswith("adb "):
+				self._run_adb_command(line[len("adb "):])
+				self.input.clear()
+				return
+			if self._is_windows:
+				# Handle built-in cd to maintain cwd
+				if line.lower().startswith("cd"):
+					parts = line.split(None, 1)
+					new_cwd = self.cwd
+					if len(parts) == 1:
+						# Just print current directory
+						self.view.appendPlainText(self.cwd)
+					else:
+						arg = parts[1].strip()
+						# Support "cd /d X:" semantics and drive switching like real CMD
+						arg = arg[3:].strip() if arg.lower().startswith("/d ") else arg
+						arg = arg.strip('"')
+						try:
+							import re
+							# Drive only (e.g., D: or D:\)
+							m_drive = re.match(r"^[A-Za-z]:\\?$", arg)
+							if m_drive:
+								drive = arg[0].upper()
+								new_cwd = f"{drive}:\\"
+							else:
+								# Absolute path with drive or root
+								if re.match(r"^[A-Za-z]:\\", arg):
+									candidate = arg
+								elif os.path.isabs(arg):
+									candidate = arg
+								else:
+									candidate = os.path.abspath(os.path.join(self.cwd, arg))
+								if os.path.isdir(candidate):
+									new_cwd = candidate
+								else:
+									self.view.appendPlainText("The system cannot find the path specified.")
+						except Exception as e:
+							self.view.appendPlainText(str(e))
+					self.cwd = new_cwd
+					self.view.appendPlainText(self.cwd + ">")
+					self.input.clear()
+					return
+				# Run command via cmd /d /c in current cwd
+				p = QtCore.QProcess(self)
+				p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+				p.setWorkingDirectory(self.cwd)
+				p.readyReadStandardOutput.connect(lambda p=p: self._append_proc_output(p))
+				p.readyReadStandardError.connect(lambda p=p: self._append_proc_output(p))
+				p.errorOccurred.connect(lambda _e, p=p: self.view.appendPlainText("[cmd error] failed to start"))
+				p.finished.connect(lambda _c, _s, p=p: (self.view.appendPlainText(self.cwd + ">"), p.deleteLater()))
+				self.view.appendPlainText(line)
+				p.start("cmd.exe", ["/d", "/c", line])
+				self.input.clear()
+				return
+			# Non-Windows: interactive bash
+			if self.proc is not None:
+				newline = "\n"
+				self.proc.write((msg + newline).encode())
+				self.proc.waitForBytesWritten(100)
+				self.input.clear()
+		except Exception as e:
+			self.view.appendPlainText(f"[terminal error] {e}")
+
+	def _run_adb_command(self, argline: str) -> None:
+		try:
+			import shlex
+			args = shlex.split(argline)
+			# Determine serial from parent CommConsole if available
+			serial = None
+			parent = self.parent()
+			try:
+				if hasattr(parent, 'adb_device_combo'):
+					serial = parent.adb_device_combo.itemData(parent.adb_device_combo.currentIndex())
+			except Exception:
+				serial = None
+			# Build final args; inject -s if serial available and not already specified
+			final_args = []
+			if serial and "-s" not in args:
+				final_args.extend(["-s", str(serial)])
+			final_args.extend(args)
+			# Run adb via a short-lived QProcess for non-blocking output
+			p = QtCore.QProcess(self)
+			p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+			p.readyReadStandardOutput.connect(lambda p=p: self._append_proc_output(p))
+			p.readyReadStandardError.connect(lambda p=p: self._append_proc_output(p))
+			p.finished.connect(lambda _c, _s, p=p: p.deleteLater())
+			self.view.appendPlainText("> adb " + " ".join(final_args))
+			p.start("adb", final_args)
+		except Exception as e:
+			self.view.appendPlainText(f"[adb error] {e}")
+
+	def _append_proc_output(self, p: QtCore.QProcess) -> None:
+		try:
+			data = p.readAllStandardOutput().data() + p.readAllStandardError().data()
+			if data:
+				try:
+					text = data.decode(errors='replace')
+				except Exception:
+					text = str(data)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.insertPlainText(text)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+		except Exception:
+			pass
+
+	# No eventFilter override is needed with QLineEdit (returnPressed is used)
 
 	def _on_uart_connect_toggle(self, checked: bool) -> None:
 		if checked:
@@ -495,8 +948,9 @@ class CommConsole(QtWidgets.QWidget):
 			return
 		try:
 			idx = self.proto_combo.currentIndex() if hasattr(self, 'proto_combo') else 0
-			if idx == 0 and self._serial is not None:
-				self._serial.write((msg + "\n").encode())
+			serial_obj = getattr(self, '_serial', None)
+			if idx == 0 and serial_obj is not None:
+				serial_obj.write((msg + "\n").encode())
 				# Echo into per-port log and keep caret at end
 				port = self.uart_port_combo.currentText()
 				self._port_logs[port] = self._port_logs.get(port, "") + msg + "\n"
