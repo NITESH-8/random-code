@@ -1517,17 +1517,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Command input removed
 
 	def _execute_test_via_adb(self, cmd_line: str) -> None:
-		"""Execute the generated AAOS command over ADB shell inside /tmp/android_stress_tool.
+		"""Execute the generated AAOS command by injecting it into the first CMD terminal.
 
-		Steps on device:
-		  - cd /tmp/android_stress_tool
-		  - chmod +x android_stress_tool
-		  - <generated-cmd>
+		This sends one adb shell command to the CMD tab so the user can see it:
+		  adb [-s <serial>] shell "cd /tmp/android_stress_tool && chmod +x android_stress_tool && <generated>"
 		"""
 		try:
-			if not _adb_available():
-				self._show_error_dialog("ADB Not Found", "adb is not available in PATH. Install Android platform-tools or add adb to PATH.")
-				return
+			# Determine first connected device (optional)
 			serial = None
 			try:
 				devs = _adb_list_devices()
@@ -1535,32 +1531,35 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					serial = devs[0][0]
 			except Exception:
 				serial = None
-			# Wait for device if a serial is known
-			try:
-				_ = _adb_wait_for_device(serial)
-			except Exception:
-				pass
-			# Run inside tool directory on device
-			device_cmd = f"cd /tmp/android_stress_tool && chmod +x android_stress_tool && {cmd_line}"
-			# Log the exact steps in the console
+			serial_arg = f" -s {serial}" if serial else ""
+			adb_cmd = (
+				f"adb{serial_arg} shell \"cd /tmp/android_stress_tool && chmod +x android_stress_tool && {cmd_line}\""
+			)
+			# Show console and switch to CMD protocol so the command is visible
 			try:
 				self.btn_uart_toggle.setChecked(True)
 				self.main_stack.setCurrentIndex(1)
-				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
-					serial_note = (serial or "<single-device>")
-					self.comm_console.log.appendPlainText(f"[ADB][Execute] adb -s {serial_note} shell")
-					self.comm_console.log.appendPlainText("[ADB][Execute] cd /tmp/android_stress_tool")
-					self.comm_console.log.appendPlainText("[ADB][Execute] chmod +x android_stress_tool")
-					self.comm_console.log.appendPlainText(f"[ADB][Execute] {cmd_line}")
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
+					self.comm_console.proto_combo.setCurrentIndex(3)  # CMD
+					self.comm_console._on_proto_changed()
 			except Exception:
 				pass
-			code, out, err = _adb_shell(serial, device_cmd)
-			if code == 0:
-				self._show_info_dialog("AAOS Test Started", (out or "Command sent over ADB."))
+			# Inject into first CMD terminal
+			term = None
+			try:
+				if hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
+					term = self.comm_console.cmd_terms[0]
+			except Exception:
+				term = None
+			if term and hasattr(term, 'input') and hasattr(term, '_send'):
+				term.input.setText(adb_cmd)
+				term._send()
 			else:
-				self._show_error_dialog("ADB Command Failed", err or out or "Unknown error while executing test over ADB")
-		except Exception as e:
-			self._show_error_dialog("ADB Error", str(e))
+				# Fallback: background cmd so execution still happens
+				import subprocess
+				subprocess.Popen(["cmd", "/d", "/c", adb_cmd], creationflags=0)
+		except Exception:
+			pass
 
 	def _start_process(self, cmd: str) -> None:
 		self._stop_process()
