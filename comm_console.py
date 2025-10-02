@@ -575,6 +575,9 @@ class TerminalWidget(QtWidgets.QWidget):
 			self.proc.start("cmd.exe")
 		else:
 			self.proc.start("bash")
+		# Sub-session for interactive adb shell
+		self._subproc = None
+		self._in_subsession = False
 
 	def _print_prompt(self) -> None:
 		try:
@@ -605,16 +608,73 @@ class TerminalWidget(QtWidgets.QWidget):
 		except Exception:
 			pass
 
+	def _on_sub_out(self) -> None:
+		try:
+			if self._subproc is None:
+				return
+			data = self._subproc.readAllStandardOutput().data() + self._subproc.readAllStandardError().data()
+			if data:
+				try:
+					text = data.decode(errors='replace')
+				except Exception:
+					text = str(data)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.insertPlainText(text)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+		except Exception:
+			pass
+
+	def _end_subsession(self) -> None:
+		try:
+			if self._subproc is not None:
+				self._subproc.deleteLater()
+			self._subproc = None
+			self._in_subsession = False
+			self.view.appendPlainText("\n[adb shell exited]\n")
+		except Exception:
+			pass
+
 	def _send(self) -> None:
 		msg = self.input.text() if hasattr(self, 'input') else ""
 		if not msg:
 			return
 		try:
-			if self.proc is not None:
-				newline = "\r\n" if self._is_windows else "\n"
-				self.proc.write((msg + newline).encode())
-				self.proc.waitForBytesWritten(100)
+			line = msg.strip()
+			# If in interactive sub-session (e.g., adb shell), send input there
+			if self._in_subsession and self._subproc is not None:
+				self._subproc.write((line + ("\r\n" if self._is_windows else "\n")).encode())
+				self._subproc.waitForBytesWritten(100)
 				self.input.clear()
+				return
+			# Special handling for interactive adb shell session
+			if line.lower().startswith("adb shell"):
+				# Determine selected serial (optional)
+				serial = None
+				parent = self.parent()
+				try:
+					if hasattr(parent, 'adb_device_combo'):
+						serial = parent.adb_device_combo.itemData(parent.adb_device_combo.currentIndex())
+				except Exception:
+					serial = None
+				args = ["adb"]
+				if serial and isinstance(serial, str) and serial:
+					args += ["-s", serial]
+				args += ["shell"]
+				self._subproc = QtCore.QProcess(self)
+				self._subproc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+				self._subproc.readyReadStandardOutput.connect(self._on_sub_out)
+				self._subproc.readyReadStandardError.connect(self._on_sub_out)
+				self._subproc.finished.connect(lambda _c, _s: self._end_subsession())
+				self._subproc.start(args[0], args[1:])
+				self._in_subsession = True
+				self.view.appendPlainText("> " + " ".join(args) + "\n")
+				self.input.clear()
+				return
+			# Otherwise write to the persistent shell
+			newline = "\r\n" if self._is_windows else "\n"
+			self.proc.write((msg + newline).encode())
+			self.proc.waitForBytesWritten(100)
+			self.input.clear()
 		except Exception as e:
 			self.view.appendPlainText(f"[terminal error] {e}")
 
