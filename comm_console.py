@@ -553,20 +553,15 @@ class TerminalWidget(QtWidgets.QWidget):
 		QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, activated=self._send)
 		self.proc = None
 		self._is_windows = platform.system().lower().startswith('win')
-		# Start in the user's home directory (like a normal CMD/Bash)
+		# Start a persistent shell so it behaves like a normal terminal
+		self.proc = QtCore.QProcess(self)
+		self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+		self.proc.readyReadStandardOutput.connect(self._on_out)
+		self.proc.readyReadStandardError.connect(self._on_out)
 		if self._is_windows:
-			self.cwd = os.path.expandvars("%USERPROFILE%") or os.path.expanduser("~") or "C:\\"
+			self.proc.start("cmd.exe")
 		else:
-			self.cwd = os.path.expanduser("~") or "/"
-		if not self._is_windows:
-			self.proc = QtCore.QProcess(self)
-			self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
-			self.proc.readyReadStandardOutput.connect(self._on_out)
-			self.proc.readyReadStandardError.connect(self._on_out)
-			self.proc.setWorkingDirectory(self.cwd)
 			self.proc.start("bash")
-		# Print prompt header once ready
-		QtCore.QTimer.singleShot(200, self._print_prompt)
 
 	def _print_prompt(self) -> None:
 		try:
