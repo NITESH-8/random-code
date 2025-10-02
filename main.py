@@ -381,7 +381,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		log_file_row = QtWidgets.QHBoxLayout()
 		log_file_row.addWidget(self._make_label("Log file path:"))
 		self.log_file_edit = QtWidgets.QLineEdit()
-		self.log_file_edit.setText(os.path.join(os.getcwd(), "random_output", "stress_too_output.txt"))
+		# Default empty; AAOS logs are streamed via adb automatically
+		self.log_file_edit.setText("")
+		self.log_file_edit.setPlaceholderText("/path/to/log (for Yocto/Ubuntu flows)")
 		self.log_file_edit.setToolTip("Full path to the stress tool output file")
 		log_file_row.addWidget(self.log_file_edit)
 		user_v.addLayout(log_file_row)
