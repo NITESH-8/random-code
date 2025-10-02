@@ -12,6 +12,12 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from .data_sources import Subsystem, get_timestamp, get_cpu_core_count, get_cpu_core_percent
+from .adb_utils import (
+	is_adb_available as _adb_available,
+	list_devices as _adb_list_devices,
+	wait_for_device as _adb_wait_for_device,
+	shell as _adb_shell,
+)
 from .comm_console import CommConsole
 
 
@@ -607,15 +613,18 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Remove text action toggle; handled by side handle now
 
 	def _on_load_binary(self) -> None:
-		"""Auto-run UART workflow using a separate hidden serial session."""
+		"""Auto-run UART workflow or AAOS ADB workflow based on target OS."""
 		try:
 			# Update tooltip to indicate automated flow
 			if hasattr(self, 'btn_load_binary'):
 				self.btn_load_binary.setToolTip("Auto loading via UART (no file selection)")
-			# Run only for Yocto/Ubuntu
+			# Route based on OS selection
 			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+			if os_sel == "AAOS":
+				self._load_binary_via_adb_aaos()
+				return
 			if os_sel not in ("Yocto", "Ubuntu"):
-				self._show_info_dialog("Not Supported", "Load Binary is supported for Yocto or Ubuntu only.")
+				self._show_info_dialog("Not Supported", "Load Binary is supported for Yocto, Ubuntu, or AAOS.")
 				return
 			# Refresh core count dynamically by querying Linux via hidden UART
 			self._update_core_count_from_linux()
@@ -625,6 +634,46 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self._auto_load_binary_over_uart()
 		except Exception:
 			pass
+
+	def _load_binary_via_adb_aaos(self) -> None:
+		"""Use Windows cmd with ADB to root and push android_stress_too for AAOS.
+
+		Commands executed (in a single cmd session):
+		  d:\n		  adb -s <first-serial> root\n		  adb -s <first-serial> push android_stress_too /tmp/
+		If exactly one device is connected, -s is optional; we include it when available.
+		"""
+		try:
+			if not _adb_available():
+				self._show_error_dialog("ADB Not Found", "adb is not available in PATH. Install Android platform-tools or add adb to PATH.")
+				return
+			serial = None
+			try:
+				devs = _adb_list_devices()
+				if devs:
+					serial = devs[0][0]
+			except Exception:
+				serial = None
+			# Build cmd line using cmd.exe as requested
+			serial_arg = f" -s {serial}" if serial else ""
+			cmd_str = f"d: && adb{serial_arg} root && adb{serial_arg} push android_stress_too /tmp/"
+			# Show commands in Access UART console
+			try:
+				self.btn_uart_toggle.setChecked(True)
+				self.main_stack.setCurrentIndex(1)
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					self.comm_console.log.appendPlainText("[ADB][Load Binary] cmd /d /c " + cmd_str)
+			except Exception:
+				pass
+			import subprocess
+			proc = subprocess.run(["cmd", "/d", "/c", cmd_str], capture_output=True, text=True)
+			out = (proc.stdout or "").strip()
+			err = (proc.stderr or "").strip()
+			if proc.returncode == 0:
+				self._show_info_dialog("Binary Loaded (AAOS)", (out or "ADB push completed.") )
+			else:
+				self._show_error_dialog("ADB Load Failed", err or out or "Unknown error during ADB push")
+		except Exception as e:
+			self._show_error_dialog("ADB Error", str(e))
 	def _update_core_count_from_linux(self) -> None:
 		"""Query Linux over UART for number of cores using nproc and update UI state.
 
@@ -1373,8 +1422,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._update_export_enabled()
 
 	def _on_start(self) -> None:
-		# Always allow starting; we'll read from the file regardless of selections
-		# Clear all time series to start fresh
+		# Prepare fresh state
 		for name in self.states:
 			self.states[name].values.clear()
 		for core_id in self.core_states:
@@ -1384,7 +1432,24 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.end_time_epoch = get_timestamp() + duration_s
 		# Ensure command preview reflects current selections
 		self._update_command_preview()
-		# Execute over UART on the Linux COM port (VID:PID=067B:23A3)
+		cmd_line = self.command_preview.toPlainText().strip()
+		# If AAOS binary, execute via ADB instead of UART
+		if cmd_line.startswith("./android_stress_tool"):
+			self._execute_test_via_adb(cmd_line)
+			# For file-driven updates, disable internal sampler to avoid mixed data
+			self._sample_timer.stop()
+			# Begin tailing the stress output file (use user-specified path) if provided
+			tail_path = self.log_file_edit.text().strip()
+			if tail_path:
+				self._start_tail_file(tail_path)
+			# Start schedule timer if there are scheduled changes
+			self._start_schedule_timer()
+			# Disable inputs while running
+			self.btn_start.setEnabled(False)
+			self.btn_stop.setEnabled(True)
+			self.duration_spin.setEnabled(False)
+			return
+		# Otherwise proceed with UART (Linux)
 		linux_port = None
 		try:
 			linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
@@ -1394,7 +1459,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			QtWidgets.QMessageBox.critical(self, "Linux UART Not Found", "Couldn't locate a COM port with VID:PID=067B:23A3.")
 			self._on_stop()
 			return
-		# If connected to a different port, disconnect first
 		try:
 			current_connected = bool(self.comm_console.uart_connect_btn.isChecked())
 			different_port = (getattr(self.comm_console, '_current_port', '') or '') != linux_port
@@ -1402,7 +1466,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				self.comm_console._uart_disconnect_if_needed()
 		except Exception:
 			pass
-		# Connect to the Linux port at 115200 if not already
 		connected = False
 		try:
 			if not self.comm_console.uart_connect_btn.isChecked() or (getattr(self.comm_console, '_current_port', '') or '') != linux_port:
@@ -1415,14 +1478,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 115200.")
 			self._on_stop()
 			return
-		# Show UART console to visualize interaction
 		try:
 			self.btn_uart_toggle.setChecked(True)
 			self.main_stack.setCurrentIndex(1)
 		except Exception:
 			pass
-		# Build and send commands: cd /; cd stress_tools; run generated command
-		cmd_line = self.command_preview.toPlainText().strip()
 		if not cmd_line:
 			QtWidgets.QMessageBox.warning(self, "No Command", "Generated command is empty.")
 		else:
@@ -1431,21 +1491,61 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				"cd stress_tools",
 				cmd_line,
 			], spacing_ms=400)
-		# For file-driven updates, disable internal sampler to avoid mixed data
 		self._sample_timer.stop()
-		# Begin tailing the stress output file (use user-specified path)
 		tail_path = self.log_file_edit.text().strip()
 		if not tail_path:
 			QtWidgets.QMessageBox.warning(self, "No Log File", "Please specify the log file path.")
 			return
 		self._start_tail_file(tail_path)
-		# Start schedule timer if there are scheduled changes
 		self._start_schedule_timer()
-		# Disable inputs while running
 		self.btn_start.setEnabled(False)
 		self.btn_stop.setEnabled(True)
 		self.duration_spin.setEnabled(False)
 		# Command input removed
+
+	def _execute_test_via_adb(self, cmd_line: str) -> None:
+		"""Execute the generated AAOS command over ADB shell in /tmp.
+
+		Per requirements:
+		  adb shell "cd /tmp && chmod +x android_stress_tool && <generated-cmd>"
+		Uses the first connected device when available.
+		"""
+		try:
+			if not _adb_available():
+				self._show_error_dialog("ADB Not Found", "adb is not available in PATH. Install Android platform-tools or add adb to PATH.")
+				return
+			serial = None
+			try:
+				devs = _adb_list_devices()
+				if devs:
+					serial = devs[0][0]
+			except Exception:
+				serial = None
+			# Wait for device if a serial is known
+			try:
+				_ = _adb_wait_for_device(serial)
+			except Exception:
+				pass
+			device_cmd = f"cd /tmp && chmod +x android_stress_tool && {cmd_line}"
+			# Show the adb shell command breakdown in the console
+			try:
+				self.btn_uart_toggle.setChecked(True)
+				self.main_stack.setCurrentIndex(1)
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					serial_note = (serial or "<single-device>")
+					self.comm_console.log.appendPlainText(f"[ADB][Execute] adb -s {serial_note} shell")
+					self.comm_console.log.appendPlainText("[ADB][Execute] cd /tmp")
+					self.comm_console.log.appendPlainText("[ADB][Execute] chmod +x android_stress_tool")
+					self.comm_console.log.appendPlainText(f"[ADB][Execute] {cmd_line}")
+			except Exception:
+				pass
+			code, out, err = _adb_shell(serial, device_cmd)
+			if code == 0:
+				self._show_info_dialog("AAOS Test Started", (out or "Command sent over ADB."))
+			else:
+				self._show_error_dialog("ADB Command Failed", err or out or "Unknown error while executing test over ADB")
+		except Exception as e:
+			self._show_error_dialog("ADB Error", str(e))
 
 	def _start_process(self, cmd: str) -> None:
 		self._stop_process()
@@ -1747,12 +1847,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		v = QtWidgets.QVBoxLayout(d)
 		# Toolbar row
 		row = QtWidgets.QHBoxLayout()
-		row.addWidget(self._make_label("Source:"))
-		path_lbl = QtWidgets.QLabel("")
+		row.addWidget(self._make_label("File:"))
+		path_lbl = QtWidgets.QLabel(self.log_file_edit.text() if hasattr(self, 'log_file_edit') else "")
 		row.addWidget(path_lbl)
 		row.addStretch(1)
-		btn_refresh = QtWidgets.QPushButton("Refresh")
-		row.addWidget(btn_refresh)
 		btn_close = QtWidgets.QPushButton("Close")
 		btn_close.clicked.connect(d.accept)
 		row.addWidget(btn_close)
@@ -1764,131 +1862,37 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-
-		# If UART is available, fetch the remote file from /stress_tools via a hidden session
-		linux_port: Optional[str] = None
+		# Load current file content
 		try:
-			linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
+			p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
+			if p and os.path.exists(p):
+				with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+					text.setPlainText(f.read())
 		except Exception:
-			linux_port = None
-
-		if linux_port:
-			path_lbl.setText("/stress_tools/stress_tool_status.txt")
+			pass
+		# Wire live updates: reuse tail to append new lines while dialog open
+		append_timer = QtCore.QTimer(d)
+		append_timer.setInterval(500)
+		def _append_new():
 			try:
-				import serial
-			except Exception:
-				# Fallback to local view when pyserial is missing
-				linux_port = None
-		
-		if linux_port:
-			# Option A: reuse console UART connection; briefly pause its poller while reading.
-			# Ensure console is connected to the Linux port.
-			try:
-				if (not self.comm_console.uart_connect_btn.isChecked()) or ((getattr(self.comm_console, '_current_port', '') or '') != linux_port):
-					self.comm_console.connect_to_port(linux_port, baud=115200)
+				p2 = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
+				if not p2 or not os.path.exists(p2):
+					return
+				with open(p2, 'rb') as f:
+					f.seek(text.document().characterCount())
+					data = f.read()
+					if data:
+						try:
+							new_txt = data.decode(errors='ignore')
+						except Exception:
+							new_txt = str(data)
+						text.moveCursor(QtGui.QTextCursor.End)
+						text.insertPlainText(new_txt)
+						text.moveCursor(QtGui.QTextCursor.End)
 			except Exception:
 				pass
-			def _fetch_remote_once() -> None:
-				ser_obj = getattr(self.comm_console, '_serial', None)
-				if ser_obj is None:
-					return
-				poll = getattr(self.comm_console, '_poll', None)
-				was_active = bool(poll.isActive()) if poll is not None else False
-				if poll is not None:
-					poll.stop()
-				try:
-					# Clear any stale bytes, then request full file and mark an end sentinel.
-					# Disable local echo to avoid command being reflected.
-					try:
-						ser_obj.reset_input_buffer()
-					except Exception:
-						pass
-					end_tag = "__EOF__"
-					cmd = "stty -echo 2>/dev/null; cd /; cd stress_tools; cat stress_tool_status.txt; echo __EOF__; stty echo 2>/dev/null\n"
-					ser_obj.write(cmd.encode())
-					# Read until we see the end tag or timeout
-					buf = b""
-					deadline = time.time() + 0.4
-					while time.time() < deadline:
-						chunk = ser_obj.read(512)
-						if chunk:
-							buf += chunk
-							if end_tag.encode() in buf:
-								break
-						else:
-							QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 10)
-					# Decode and strip shell echoes/prompt and the end tag
-					text_raw = buf.decode(errors='ignore') if buf else ""
-					# Keep only content before the end tag
-					text_raw = text_raw.split(end_tag)[0]
-					# Drop a possible first echoed command line entirely
-					first_nl = text_raw.find('\n')
-					if first_nl != -1:
-						first_line = text_raw[:first_nl].strip()
-						if first_line.startswith('cd /; cd stress_tools; cat stress_tool_status.txt'):
-							text_raw = text_raw[first_nl + 1:]
-					# If the file is missing, cat prints an error we can detect
-					if "No such file or directory" in text_raw:
-						QtWidgets.QMessageBox.critical(self, "File Not Found", "File does not exist: stress_tool_status.txt")
-						d.reject()
-						return
-					# Remove echoed shell commands and sentinel
-					def _is_echo(line: str) -> bool:
-						ls = line.strip()
-						if not ls:
-							return False
-						if ls.startswith('cd '):
-							return True
-						if ls.startswith('echo __EOF__'):
-							return True
-						if ls.startswith('cat stress_tool_status.txt'):
-							return True
-						if ls.startswith('stty -echo') or ls.startswith('stty echo'):
-							return True
-						return False
-					lines = [ln for ln in text_raw.splitlines() if not _is_echo(ln)]
-					# Remove likely shell prompts (ending with '# ' or '$ ')
-					clean = []
-					for ln in lines:
-						ls = ln.strip()
-						if ls.endswith('#') or ls.endswith('$'):
-							continue
-						clean.append(ln)
-					new_text = "\n".join(clean).rstrip("\r\n")
-					# If nothing was read, keep previous content
-					if not new_text:
-						return
-					# Append-only update to preserve scroll position when possible
-					prev = text.toPlainText()
-					if new_text.startswith(prev) and len(new_text) >= len(prev):
-						append = new_text[len(prev):]
-						if append:
-							text.moveCursor(QtGui.QTextCursor.End)
-							text.insertPlainText(append)
-							text.moveCursor(QtGui.QTextCursor.End)
-					else:
-						text.setPlainText(new_text)
-				except Exception:
-					pass
-				finally:
-					# Resume console poller and clear any residual bytes
-					try:
-						if ser_obj is not None:
-							ser_obj.reset_input_buffer()
-					except Exception:
-						pass
-					if poll is not None and was_active and not poll.isActive():
-						poll.start()
-			# Wire refresh and start periodic polling
-			btn_refresh.clicked.connect(_fetch_remote_once)
-			poll_timer = QtCore.QTimer(d)
-			poll_timer.setInterval(2000)
-			poll_timer.timeout.connect(_fetch_remote_once)
-			poll_timer.start()
-			_fetch_remote_once()
-		else:
-			QtWidgets.QMessageBox.critical(self, "Linux UART Not Found", "Couldn't locate a COM port with VID:PID=067B:23A3.")
-			return
+		append_timer.timeout.connect(_append_new)
+		append_timer.start()
 		d.exec()
 
 	def _parse_stress_output(self, output: str) -> None:
@@ -1979,8 +1983,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.btn_export_png.setEnabled(self.combo_active.currentText() != "")
 
 	def _update_command_preview(self) -> None:
-		# Build Linux stress command from current selections
-		parts: List[str] = ["./stress_tool"]
+		# Build stress command from current selections
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		is_aaos = (os_sel == "AAOS")
+		binary = "./android_stress_tool" if is_aaos else "./stress_tool"
+		parts: List[str] = [binary]
 		
 		# CPU load (overall CPU target) - only if CPU Target is checked
 		if (Subsystem.CPU in self.active_subsystems and 
@@ -2009,8 +2016,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		
 		# Duration
 		dur = int(self.duration_spin.value())
-		parts.extend(["--duration", str(dur), "--quiet"])
-		self.command_preview.setPlainText(" ".join(parts) + " &")
+		parts.extend(["--duration", str(dur)])
+		# For all OS targets, add quiet and background
+		cmd = " ".join(parts) + " --quiet &"
+		self.command_preview.setPlainText(cmd)
 
 	def _start_tail_file(self, path: str) -> None:
 		"""Start tailing the stress output file located at path."""
