@@ -553,11 +553,24 @@ class TerminalWidget(QtWidgets.QWidget):
 		QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, activated=self._send)
 		self.proc = None
 		self._is_windows = platform.system().lower().startswith('win')
+		# Track a current working directory for header/clear prompt convenience
+		try:
+			if self._is_windows:
+				self.cwd = os.path.expandvars("%USERPROFILE%") or os.path.expanduser("~") or "C:\\"
+			else:
+				self.cwd = os.path.expanduser("~") or "/"
+		except Exception:
+			self.cwd = "C:\\" if self._is_windows else "/"
 		# Start a persistent shell so it behaves like a normal terminal
 		self.proc = QtCore.QProcess(self)
 		self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 		self.proc.readyReadStandardOutput.connect(self._on_out)
 		self.proc.readyReadStandardError.connect(self._on_out)
+		# Ensure the shell starts in home directory like a normal CMD window
+		try:
+			self.proc.setWorkingDirectory(self.cwd)
+		except Exception:
+			pass
 		if self._is_windows:
 			self.proc.start("cmd.exe")
 		else:
@@ -597,65 +610,8 @@ class TerminalWidget(QtWidgets.QWidget):
 		if not msg:
 			return
 		try:
-			line = msg.strip()
-			# Intercept adb commands and run via adb_utils for reliability
-			if line.lower().startswith("adb "):
-				self._run_adb_command(line[len("adb "):])
-				self.input.clear()
-				return
-			if self._is_windows:
-				# Handle built-in cd to maintain cwd
-				if line.lower().startswith("cd"):
-					parts = line.split(None, 1)
-					new_cwd = self.cwd
-					if len(parts) == 1:
-						# Just print current directory
-						self.view.appendPlainText(self.cwd)
-					else:
-						arg = parts[1].strip()
-						# Support "cd /d X:" semantics and drive switching like real CMD
-						arg = arg[3:].strip() if arg.lower().startswith("/d ") else arg
-						arg = arg.strip('"')
-						try:
-							import re
-							# Drive only (e.g., D: or D:\)
-							m_drive = re.match(r"^[A-Za-z]:\\?$", arg)
-							if m_drive:
-								drive = arg[0].upper()
-								new_cwd = f"{drive}:\\"
-							else:
-								# Absolute path with drive or root
-								if re.match(r"^[A-Za-z]:\\", arg):
-									candidate = arg
-								elif os.path.isabs(arg):
-									candidate = arg
-								else:
-									candidate = os.path.abspath(os.path.join(self.cwd, arg))
-								if os.path.isdir(candidate):
-									new_cwd = candidate
-								else:
-									self.view.appendPlainText("The system cannot find the path specified.")
-						except Exception as e:
-							self.view.appendPlainText(str(e))
-					self.cwd = new_cwd
-					self.view.appendPlainText(self.cwd + ">")
-					self.input.clear()
-					return
-				# Run command via cmd /d /c in current cwd
-				p = QtCore.QProcess(self)
-				p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
-				p.setWorkingDirectory(self.cwd)
-				p.readyReadStandardOutput.connect(lambda p=p: self._append_proc_output(p))
-				p.readyReadStandardError.connect(lambda p=p: self._append_proc_output(p))
-				p.errorOccurred.connect(lambda _e, p=p: self.view.appendPlainText("[cmd error] failed to start"))
-				p.finished.connect(lambda _c, _s, p=p: (self.view.appendPlainText(self.cwd + ">"), p.deleteLater()))
-				self.view.appendPlainText(line)
-				p.start("cmd.exe", ["/d", "/c", line])
-				self.input.clear()
-				return
-			# Non-Windows: interactive bash
 			if self.proc is not None:
-				newline = "\n"
+				newline = "\r\n" if self._is_windows else "\n"
 				self.proc.write((msg + newline).encode())
 				self.proc.waitForBytesWritten(100)
 				self.input.clear()
