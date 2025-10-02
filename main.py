@@ -1448,13 +1448,17 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		cmd_line = self.command_preview.toPlainText().strip()
 		# If AAOS binary, execute via ADB instead of UART
 		if cmd_line.startswith("./android_stress_tool"):
-			self._execute_test_via_adb(cmd_line)
-			# For file-driven updates, disable internal sampler to avoid mixed data
-			self._sample_timer.stop()
-			# Begin tailing the stress output file (use user-specified path) if provided
-			tail_path = self.log_file_edit.text().strip()
-			if tail_path:
-				self._start_tail_file(tail_path)
+			# Find first device serial (optional)
+			serial = None
+			try:
+				devs = _adb_list_devices()
+				if devs:
+					serial = devs[0][0]
+			except Exception:
+				serial = None
+			self._execute_test_via_adb(cmd_line, serial)
+			# Stream device status log into the app from /tmp/android_stress_tool/stress_tool_status.txt
+			self._start_adb_tail(serial)
 			# Start schedule timer if there are scheduled changes
 			self._start_schedule_timer()
 			# Disable inputs while running
@@ -1516,21 +1520,21 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.duration_spin.setEnabled(False)
 		# Command input removed
 
-	def _execute_test_via_adb(self, cmd_line: str) -> None:
+	def _execute_test_via_adb(self, cmd_line: str, serial: Optional[str] = None) -> None:
 		"""Execute the generated AAOS command by injecting it into the first CMD terminal.
 
 		This sends one adb shell command to the CMD tab so the user can see it:
 		  adb [-s <serial>] shell "cd /tmp/android_stress_tool && chmod +x android_stress_tool && <generated>"
 		"""
 		try:
-			# Determine first connected device (optional)
-			serial = None
-			try:
-				devs = _adb_list_devices()
-				if devs:
-					serial = devs[0][0]
-			except Exception:
-				serial = None
+			# Determine first connected device (optional) if not provided
+			if serial is None:
+				try:
+					devs = _adb_list_devices()
+					if devs:
+						serial = devs[0][0]
+				except Exception:
+					serial = None
 			serial_arg = f" -s {serial}" if serial else ""
 			adb_cmd = (
 				f"adb{serial_arg} shell \"cd /tmp/android_stress_tool && chmod +x android_stress_tool && {cmd_line}\""
@@ -1558,6 +1562,23 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				# Fallback: background cmd so execution still happens
 				import subprocess
 				subprocess.Popen(["cmd", "/d", "/c", adb_cmd], creationflags=0)
+		except Exception:
+			pass
+
+	def _start_adb_tail(self, serial: Optional[str]) -> None:
+		"""Start streaming the device log file into the app via adb tail -f."""
+		try:
+			self._stop_process()
+			self.process = QtCore.QProcess(self)
+			self.process.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+			self.process.readyReadStandardOutput.connect(self._on_process_output)
+			self.process.finished.connect(self._on_process_finished)
+			args: List[str] = []
+			if serial:
+				args += ["-s", serial]
+			args += ["shell", "tail", "-n", "+1", "-f", "/tmp/android_stress_tool/stress_tool_status.txt"]
+			self.process.start("adb", args)
+			# don't wait; stream as available
 		except Exception:
 			pass
 
