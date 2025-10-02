@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from typing import Optional, List, Callable
+import os
+import platform
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from .adb_utils import is_adb_available, list_devices as adb_list_devices, shell as adb_shell, adb_version, wait_for_device
 
 
 class CommConsole(QtWidgets.QWidget):
@@ -23,6 +27,7 @@ class CommConsole(QtWidgets.QWidget):
 		super().__init__(parent)
 		self._build_ui()
 		self._setup_uart()
+		# ADB-only prompt is printed when ADB protocol is selected
 
 	def _build_ui(self) -> None:
 		v = QtWidgets.QVBoxLayout(self)
@@ -118,11 +123,16 @@ class CommConsole(QtWidgets.QWidget):
 		adb.setSpacing(8)
 		adb.addWidget(QtWidgets.QLabel("ADB Device:"))
 		self.adb_device_combo = QtWidgets.QComboBox()
-		self.adb_device_combo.addItem("Select device (todo)")
+		self.adb_device_combo.setMinimumWidth(220)
 		adb.addWidget(self.adb_device_combo)
+		self.btn_adb_refresh = QtWidgets.QPushButton("Refresh")
+		self.btn_adb_refresh.clicked.connect(self._refresh_adb_devices)
+		adb.addWidget(self.btn_adb_refresh)
 		adb.addStretch(1)
-		self.btn_adb_connect = QtWidgets.QPushButton("Connect (todo)")
-		self.btn_adb_connect.setEnabled(False)
+		self.btn_adb_connect = QtWidgets.QPushButton("Connect")
+		self.btn_adb_connect.setCheckable(True)
+		self.btn_adb_connect.toggled.connect(self._on_adb_connect_toggle)
+		self.btn_adb_connect.setEnabled(is_adb_available())
 		adb.addWidget(self.btn_adb_connect)
 		self.proto_stack.addWidget(adb_controls)
 
@@ -153,6 +163,13 @@ class CommConsole(QtWidgets.QWidget):
 		self.refresh_ports()
 		# Default SOC USB identifier (Windows hwid format substring)
 		self._soc_port_id = "VID:PID=067B:23A3"
+		# ADB runtime state
+		self._adb_connected = False
+		self._adb_serial = None  # type: ignore[assignment]
+		self._adb_cmd_timer = QtCore.QTimer(self)
+		self._adb_cmd_timer.setSingleShot(True)
+		# Populate ADB devices initially so the page shows data when selected
+		self._refresh_adb_devices()
 
 	def _on_proto_changed(self) -> None:
 		idx = self.proto_combo.currentIndex()
@@ -171,6 +188,10 @@ class CommConsole(QtWidgets.QWidget):
 			self._reset_uart_controls(clear_ports=True)
 			self.refresh_ports()
 			self._on_port_changed(self.uart_port_combo.currentText())
+		# When switching to ADB, refresh device list and show host prompt
+		if idx == 2:
+			self._refresh_adb_devices()
+			self._print_host_prompt()
 
 	def refresh_ports(self) -> None:
 		"""Refresh UART ports list."""
@@ -182,6 +203,60 @@ class CommConsole(QtWidgets.QWidget):
 		except Exception:
 			self.uart_port_combo.clear()
 			self.uart_port_combo.addItems(["COM1"]) 
+
+	# ===== ADB integration =====
+	def _refresh_adb_devices(self) -> None:
+		"""Refresh the list of ADB devices in the combo box."""
+		try:
+			self.adb_device_combo.clear()
+			if not is_adb_available():
+				self.adb_device_combo.addItem("adb not found")
+				self.btn_adb_connect.setEnabled(False)
+				return
+			devs = adb_list_devices()
+			if not devs:
+				self.adb_device_combo.addItem("No devices")
+				self.btn_adb_connect.setEnabled(False)
+			else:
+				for serial, label in devs:
+					self.adb_device_combo.addItem(label, serial)
+				self.btn_adb_connect.setEnabled(True)
+		except Exception:
+			try:
+				self.adb_device_combo.addItem("Error listing devices")
+				self.btn_adb_connect.setEnabled(False)
+			except Exception:
+				pass
+
+	def _on_adb_connect_toggle(self, checked: bool) -> None:
+		"""Connect/disconnect ADB logical session (tracks selected serial)."""
+		if checked:
+			try:
+				idx = self.adb_device_combo.currentIndex()
+				serial = self.adb_device_combo.itemData(idx)
+				if not serial or isinstance(serial, str) and serial.lower() in ("no devices", "adb not found"):
+					raise RuntimeError("No ADB device selected")
+				# Wait for device to be ready
+				code, out, err = wait_for_device(serial)
+				if code != 0:
+					raise RuntimeError(err or out or "Failed waiting for device")
+				# Simple version probe
+				_ = adb_version()
+				self._adb_connected = True
+				self._adb_serial = serial
+				self.btn_adb_connect.setText("Disconnect")
+				# Show a note in log
+				if hasattr(self, 'log'):
+					self.log.appendPlainText(f"[ADB] Connected to {serial}")
+			except Exception as e:
+				QtWidgets.QMessageBox.critical(self, "ADB Connect Failed", str(e))
+				self.btn_adb_connect.setChecked(False)
+		else:
+			self._adb_connected = False
+			self._adb_serial = None
+			self.btn_adb_connect.setText("Connect")
+			if hasattr(self, 'log'):
+				self.log.appendPlainText("[ADB] Disconnected")
 
 	def _on_uart_connect_toggle(self, checked: bool) -> None:
 		if checked:
@@ -232,6 +307,29 @@ class CommConsole(QtWidgets.QWidget):
 			except Exception:
 				pass
 			self.uart_connect_btn.setText("Connect")
+
+	def _print_host_prompt(self) -> None:
+		"""Append a CMD-like header and current directory prompt to the log."""
+		try:
+			if not hasattr(self, 'log'):
+				return
+			# Only print when empty to avoid spamming
+			if self.log.toPlainText().strip():
+				return
+			is_windows = platform.system().lower().startswith('win')
+			cwd = os.getcwd()
+			if is_windows:
+				ver = platform.version()
+				self.log.appendPlainText(f"Microsoft Windows [Version {ver}]")
+				self.log.appendPlainText("(c) Microsoft Corporation. All rights reserved.")
+				self.log.appendPlainText("")
+				self.log.appendPlainText(cwd + ">")
+			else:
+				user = os.environ.get('USER') or os.environ.get('USERNAME') or ''
+				host = platform.node()
+				self.log.appendPlainText(f"{user}@{host}:{cwd}$")
+		except Exception:
+			pass
 
 	def _on_uart_clear(self) -> None:
 		"""Clear only the currently selected port's session log."""
@@ -396,7 +494,8 @@ class CommConsole(QtWidgets.QWidget):
 		if not msg:
 			return
 		try:
-			if self._serial is not None:
+			idx = self.proto_combo.currentIndex() if hasattr(self, 'proto_combo') else 0
+			if idx == 0 and self._serial is not None:
 				self._serial.write((msg + "\n").encode())
 				# Echo into per-port log and keep caret at end
 				port = self.uart_port_combo.currentText()
@@ -404,6 +503,18 @@ class CommConsole(QtWidgets.QWidget):
 				if hasattr(self, 'log'):
 					self.log.moveCursor(QtGui.QTextCursor.End)
 					self.log.insertPlainText("\n")
+					self.log.moveCursor(QtGui.QTextCursor.End)
+				if hasattr(self, 'input'):
+					self.input.clear()
+			elif idx == 2 and self._adb_connected:
+				# Send via adb shell and display output
+				serial = self._adb_serial
+				code, out, err = adb_shell(serial, msg)
+				if hasattr(self, 'log'):
+					self.log.moveCursor(QtGui.QTextCursor.End)
+					self.log.insertPlainText((out + ("\n" if out else "")) or "")
+					if err:
+						self.log.insertPlainText((err + "\n"))
 					self.log.moveCursor(QtGui.QTextCursor.End)
 				if hasattr(self, 'input'):
 					self.input.clear()
