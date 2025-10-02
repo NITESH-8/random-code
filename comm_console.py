@@ -575,7 +575,7 @@ class TerminalWidget(QtWidgets.QWidget):
 			self.proc.start("cmd.exe")
 		else:
 			self.proc.start("bash")
-		# Sub-session for interactive adb shell
+		# Minimal interactive sub-session for adb shell
 		self._subproc = None
 		self._in_subsession = False
 
@@ -639,7 +639,32 @@ class TerminalWidget(QtWidgets.QWidget):
 		if not msg:
 			return
 		try:
-			# Write input directly to the persistent shell (cmd.exe/bash)
+			line = msg.strip()
+			# If we're in an interactive adb shell subsession, route input there
+			if self._in_subsession and self._subproc is not None:
+				self._subproc.write((line + "\n").encode())
+				self._subproc.waitForBytesWritten(100)
+				self.input.clear()
+				return
+			# If user requested adb shell, spawn a dedicated interactive subsession
+			try:
+				import shlex
+				parts = shlex.split(line)
+			except Exception:
+				parts = line.split()
+			if parts and parts[0].lower() == "adb" and parts[-1].lower() == "shell":
+				self._subproc = QtCore.QProcess(self)
+				self._subproc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+				self._subproc.readyReadStandardOutput.connect(self._on_sub_out)
+				self._subproc.readyReadStandardError.connect(self._on_sub_out)
+				self._subproc.finished.connect(lambda _c, _s: self._end_subsession())
+				# Start adb shell exactly as typed (excluding the leading 'adb')
+				self._subproc.start("adb", parts[1:])
+				self._in_subsession = True
+				self.view.appendPlainText("> " + " ".join(parts) + "\n[interactive adb shell - type 'exit' to return]\n")
+				self.input.clear()
+				return
+			# Otherwise write input directly to the persistent shell (cmd/bash)
 			newline = "\r\n" if self._is_windows else "\n"
 			if self.proc is not None:
 				self.proc.write((msg + newline).encode())
