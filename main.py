@@ -165,6 +165,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._blk_core_vals: Dict[int, float] = {}
 		self._blk_dram_val: Optional[float] = None
 		self._blk_gpu_val: Optional[float] = None
+		# Raw log buffer used for Show Log (works for local tail and adb tail)
+		self._raw_log_buffer: str = ""
 
 	# No app-level event filter required; handled inside CommConsole
 
@@ -1445,8 +1447,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.is_running = True
 		duration_s = int(self.duration_spin.value())
 		self.end_time_epoch = get_timestamp() + duration_s
-		# Ensure command preview reflects current selections
+		# Ensure command preview reflects current selections and reset live log buffer
 		self._update_command_preview()
+		self._raw_log_buffer = ""
 		cmd_line = self.command_preview.toPlainText().strip()
 		# If AAOS binary, execute via ADB instead of UART
 		if cmd_line.startswith("./android_stress_tool"):
@@ -1461,6 +1464,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self._execute_test_via_adb(cmd_line, serial)
 			# Stream device status log into the app from /tmp/android_stress_tool/stress_tool_status.txt
 			self._start_adb_tail(serial)
+			# Auto-open Show Log so the user sees the device status immediately
+			try:
+				self._open_log_dialog()
+			except Exception:
+				pass
 			# Start schedule timer if there are scheduled changes
 			self._start_schedule_timer()
 			# Disable inputs while running
@@ -1628,14 +1636,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self._on_stop()
 			return
 		if self.process is not None:
-			self.line_buffer += self.process.readAllStandardOutput().data()
-			lines = self.line_buffer.split(b"\n")
-			self.line_buffer = lines[-1]
-			for raw in lines[:-1]:
-				line = raw.decode(errors="ignore").strip()
-				if not line:
-					continue
-				self._try_parse_and_store(line, now)
+			chunk = self.process.readAllStandardOutput().data()
+			if chunk:
+				try:
+					self._raw_log_buffer += chunk.decode(errors='ignore')
+				except Exception:
+					self._raw_log_buffer += str(chunk)
+			self.line_buffer += chunk
 		self._redraw_curve()
 		self._refresh_numeric_list()
 		self._update_export_enabled()
@@ -1899,36 +1906,36 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Load current file content
+		# Load current content from in-memory buffer if available; otherwise try file
 		try:
-			p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
-			if p and os.path.exists(p):
-				with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-					text.setPlainText(f.read())
+			if hasattr(self, '_raw_log_buffer') and self._raw_log_buffer:
+				text.setPlainText(self._raw_log_buffer)
+			else:
+				p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
+				if p and os.path.exists(p):
+					with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+						text.setPlainText(f.read())
 		except Exception:
 			pass
-		# Wire live updates: reuse tail to append new lines while dialog open
+		# Live updates: reflect _raw_log_buffer into the dialog periodically
 		append_timer = QtCore.QTimer(d)
-		append_timer.setInterval(500)
-		def _append_new():
+		append_timer.setInterval(300)
+		_prev_len = {'n': 0}
+		def _pump():
 			try:
-				p2 = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
-				if not p2 or not os.path.exists(p2):
+				buf = getattr(self, '_raw_log_buffer', '')
+				if not buf:
 					return
-				with open(p2, 'rb') as f:
-					f.seek(text.document().characterCount())
-					data = f.read()
-					if data:
-						try:
-							new_txt = data.decode(errors='ignore')
-						except Exception:
-							new_txt = str(data)
-						text.moveCursor(QtGui.QTextCursor.End)
-						text.insertPlainText(new_txt)
-						text.moveCursor(QtGui.QTextCursor.End)
+				cur = len(buf)
+				if cur > _prev_len['n']:
+					new_txt = buf[_prev_len['n']:]
+					text.moveCursor(QtGui.QTextCursor.End)
+					text.insertPlainText(new_txt)
+					text.moveCursor(QtGui.QTextCursor.End)
+					_prev_len['n'] = cur
 			except Exception:
 				pass
-		append_timer.timeout.connect(_append_new)
+		append_timer.timeout.connect(_pump)
 		append_timer.start()
 		d.exec()
 
@@ -2144,6 +2151,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				self.tail_status.setText(f"size={file_size} pos={self._file_tail_pos} lines={len(new_lines)} q={len(self._block_queue)} idx={self._file_block_idx}")
 			except Exception:
 				pass
+		# Also append to raw buffer for Show Log
+		try:
+			if new_lines:
+				self._raw_log_buffer += ("\n".join(new_lines) + "\n")
+		except Exception:
+			pass
 
 	def _parse_stress_lines(self, lines: List[str]) -> None:
 		# Continue filling the current block across timer ticks
