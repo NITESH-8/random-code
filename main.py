@@ -1517,11 +1517,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Command input removed
 
 	def _execute_test_via_adb(self, cmd_line: str) -> None:
-		"""Execute the generated AAOS command over ADB shell in /tmp.
+		"""Execute the generated AAOS command over ADB shell inside /tmp/android_stress_tool.
 
-		Per requirements:
-		  adb shell "cd /tmp && chmod +x android_stress_tool && <generated-cmd>"
-		Uses the first connected device when available.
+		Steps on device:
+		  - cd /tmp/android_stress_tool
+		  - chmod +x android_stress_tool
+		  - <generated-cmd>
 		"""
 		try:
 			if not _adb_available():
@@ -1539,15 +1540,16 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				_ = _adb_wait_for_device(serial)
 			except Exception:
 				pass
-			device_cmd = f"cd /tmp && chmod +x android_stress_tool && {cmd_line}"
-			# Show the adb shell command breakdown in the console
+			# Run inside tool directory on device
+			device_cmd = f"cd /tmp/android_stress_tool && chmod +x android_stress_tool && {cmd_line}"
+			# Log the exact steps in the console
 			try:
 				self.btn_uart_toggle.setChecked(True)
 				self.main_stack.setCurrentIndex(1)
 				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
 					serial_note = (serial or "<single-device>")
 					self.comm_console.log.appendPlainText(f"[ADB][Execute] adb -s {serial_note} shell")
-					self.comm_console.log.appendPlainText("[ADB][Execute] cd /tmp")
+					self.comm_console.log.appendPlainText("[ADB][Execute] cd /tmp/android_stress_tool")
 					self.comm_console.log.appendPlainText("[ADB][Execute] chmod +x android_stress_tool")
 					self.comm_console.log.appendPlainText(f"[ADB][Execute] {cmd_line}")
 			except Exception:
