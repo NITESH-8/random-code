@@ -643,37 +643,35 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		If exactly one device is connected, -s is optional; we include it when available.
 		"""
 		try:
-			if not _adb_available():
-				self._show_error_dialog("ADB Not Found", "adb is not available in PATH. Install Android platform-tools or add adb to PATH.")
-				return
-			serial = None
-			try:
-				devs = _adb_list_devices()
-				if devs:
-					serial = devs[0][0]
-			except Exception:
-				serial = None
-			# Build cmd line using cmd.exe as requested
-			serial_arg = f" -s {serial}" if serial else ""
-			cmd_str = f"d: && adb{serial_arg} root && adb{serial_arg} push d:android_stress_tool /tmp/"
-			# Show commands in Access UART console
+			# Show console and switch to CMD protocol so commands are visible
 			try:
 				self.btn_uart_toggle.setChecked(True)
 				self.main_stack.setCurrentIndex(1)
-				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
-					self.comm_console.log.appendPlainText("[ADB][Load Binary] cmd /d /c " + cmd_str)
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
+					self.comm_console.proto_combo.setCurrentIndex(3)  # CMD
+					self.comm_console._on_proto_changed()
 			except Exception:
 				pass
+			# Inject commands into the first CMD terminal
+			term = None
+			try:
+				if hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
+					term = self.comm_console.cmd_terms[0]
+			except Exception:
+				term = None
+			if term and hasattr(term, 'input') and hasattr(term, '_send'):
+				# Run adb commands directly; absolute path does not require drive switch
+				for cmd in ["adb root", "adb push d:\\android_stress_tool /tmp"]:
+					term.input.setText(cmd)
+					term._send()
+				return
+			# Fallback: run using cmd /c so the action still happens even if CMD tab isn't available
 			import subprocess
-			proc = subprocess.run(["cmd", "/d", "/c", cmd_str], capture_output=True, text=True)
-			out = (proc.stdout or "").strip()
-			err = (proc.stderr or "").strip()
-			if proc.returncode == 0:
-				self._show_info_dialog("Binary Loaded (AAOS)", (out or "ADB push completed.") )
-			else:
-				self._show_error_dialog("ADB Load Failed", err or out or "Unknown error during ADB push")
-		except Exception as e:
-			self._show_error_dialog("ADB Error", str(e))
+			fallback_cmd = "adb root && adb push d:\\android_stress_tool /tmp"
+			subprocess.Popen(["cmd", "/d", "/c", fallback_cmd], creationflags=0)
+		except Exception:
+			pass
+
 	def _update_core_count_from_linux(self) -> None:
 		"""Query Linux over UART for number of cores using nproc and update UI state.
 
