@@ -636,14 +636,30 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			pass
 
 	def _load_binary_via_adb_aaos(self) -> None:
-		"""Use Windows cmd with ADB to root and push android_stress_too for AAOS.
+		"""Send two adb commands to the embedded CMD terminal for AAOS.
 
-		Commands executed (in a single cmd session):
-		  d:\n		  adb -s <first-serial> root\n		  adb -s <first-serial> push android_stress_too /tmp/
-		If exactly one device is connected, -s is optional; we include it when available.
+		Commands executed in CMD:
+		  adb root
+		  adb push d:\\android_stress_tool /tmp/
+		If a device is connected, the commands are prefixed with -s <first-serial>.
 		"""
 		try:
-			# Show console and switch to CMD protocol so commands are visible
+			# Discover first connected device (optional)
+			serial = None
+			try:
+				devs = _adb_list_devices()
+				if devs:
+					serial = devs[0][0]
+			except Exception:
+				serial = None
+			# Prepare commands
+			if serial:
+				cmd1 = f"adb -s {serial} root"
+				cmd2 = f"adb -s {serial} push d:\\android_stress_tool /tmp/"
+			else:
+				cmd1 = "adb root"
+				cmd2 = "adb push d:\\android_stress_tool /tmp/"
+			# Show console and switch to CMD protocol
 			try:
 				self.btn_uart_toggle.setChecked(True)
 				self.main_stack.setCurrentIndex(1)
@@ -652,7 +668,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					self.comm_console._on_proto_changed()
 			except Exception:
 				pass
-			# Inject commands into the first CMD terminal
+			# Use first CMD terminal if available
 			term = None
 			try:
 				if hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
@@ -660,15 +676,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			except Exception:
 				term = None
 			if term and hasattr(term, 'input') and hasattr(term, '_send'):
-				# Run adb commands directly; absolute path does not require drive switch
-				for cmd in ["adb root", "adb push d:\\android_stress_tool /tmp"]:
-					term.input.setText(cmd)
+				for c in (cmd1, cmd2):
+					term.input.setText(c)
 					term._send()
 				return
-			# Fallback: run using cmd /c so the action still happens even if CMD tab isn't available
+			# Fallback: run in background cmd if CMD terminal not available
 			import subprocess
-			fallback_cmd = "adb root && adb push d:\\android_stress_tool /tmp"
-			subprocess.Popen(["cmd", "/d", "/c", fallback_cmd], creationflags=0)
+			fallback = f"{cmd1} && {cmd2}"
+			subprocess.Popen(["cmd", "/d", "/c", fallback], creationflags=0)
 		except Exception:
 			pass
 
