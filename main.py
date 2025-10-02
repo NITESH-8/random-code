@@ -655,7 +655,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				serial = None
 			# Build cmd line using cmd.exe as requested
 			serial_arg = f" -s {serial}" if serial else ""
-			cmd_str = f"d: && adb{serial_arg} root && adb{serial_arg} push android_stress_too /tmp/"
+			cmd_str = f"d: && adb{serial_arg} root && adb{serial_arg} push d:android_stress_tool /tmp/"
 			# Show commands in Access UART console
 			try:
 				self.btn_uart_toggle.setChecked(True)
