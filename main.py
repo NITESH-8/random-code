@@ -167,6 +167,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._blk_gpu_val: Optional[float] = None
 		# Raw log buffer used for Show Log (works for local tail and adb tail)
 		self._raw_log_buffer: str = ""
+		# Track whether we are currently tailing via ADB (AAOS) so the Show Log
+		# does not preload any previous local file content.
+		self._tailing_via_adb: bool = False
 
 	# No app-level event filter required; handled inside CommConsole
 
@@ -1579,6 +1582,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		"""Start streaming the device log file into the app via adb tail -f."""
 		try:
 			self._stop_process()
+			# Mark AAOS tailing active and clear any previous live buffer
+			self._tailing_via_adb = True
+			self._raw_log_buffer = ""
 			self.process = QtCore.QProcess(self)
 			self.process.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 			self.process.readyReadStandardOutput.connect(self._on_process_output)
@@ -1594,8 +1600,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# Portable wait (first run) without requiring external tools; then follow from EOF
 			# so we do not include any previous run's content in the Show Log.
 			wait_and_tail = (
-				f"while [ ! -e \"{status_path}\" ]; do sleep 0.5; done; "
-				f"tail -n 0 -F \"{status_path}\""
+				f"while [ ! -e \"{status_path}\" ]; do sleep 0.2; done; "
+				f"tail -n 0 -F \"{status_path}\" 2>/dev/null"
 			)
 			args += ["shell", wait_and_tail]
 			self.process.start("adb", args)
@@ -1640,6 +1646,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.is_running = False
 		self._stop_process()
 		self._sample_timer.stop()
+		# Clear ADB tailing flag when process ends so Show Log can fallback
+		self._tailing_via_adb = False
 
 	def _on_process_output(self) -> None:
 		now = get_timestamp()
@@ -1919,13 +1927,18 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		v.addWidget(text, 1)
 		# Load current content from in-memory buffer if available; otherwise try file
 		try:
-			if hasattr(self, '_raw_log_buffer') and self._raw_log_buffer:
-				text.setPlainText(self._raw_log_buffer)
+			# If we are tailing via ADB, avoid preloading any existing local file
+			# content; only display what has streamed into the in-memory buffer.
+			if getattr(self, '_tailing_via_adb', False):
+				text.setPlainText(getattr(self, '_raw_log_buffer', ''))
 			else:
-				p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
-				if p and os.path.exists(p):
-					with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-						text.setPlainText(f.read())
+				if hasattr(self, '_raw_log_buffer') and self._raw_log_buffer:
+					text.setPlainText(self._raw_log_buffer)
+				else:
+					p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
+					if p and os.path.exists(p):
+						with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+							text.setPlainText(f.read())
 		except Exception:
 			pass
 		# Live updates: reflect _raw_log_buffer into the dialog periodically
