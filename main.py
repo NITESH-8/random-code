@@ -1586,7 +1586,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			args: List[str] = []
 			if serial:
 				args += ["-s", serial]
-			args += ["shell", "tail", "-n", "+1", "-f", "/tmp/android_stress_tool/stress_tool_status.txt"]
+			# Wait for the file to appear on device, then follow it from the start.
+			# This avoids a race where tail exits with "No such file or directory" if
+			# Execute Test starts slightly before the tool creates the status file.
+			status_path = "/tmp/android_stress_tool/stress_tool_status.txt"
+			wait_and_tail = f"while [ ! -f {status_path} ]; do sleep 0.5; done; tail -n +1 -f {status_path}"
+			args += ["shell", "sh", "-c", wait_and_tail]
 			self.process.start("adb", args)
 			# don't wait; stream as available
 		except Exception:
