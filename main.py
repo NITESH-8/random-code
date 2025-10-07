@@ -167,9 +167,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._blk_gpu_val: Optional[float] = None
 		# Raw log buffer used for Show Log (works for local tail and adb tail)
 		self._raw_log_buffer: str = ""
-		# Track whether we are currently tailing via ADB (AAOS) so the Show Log
-		# does not preload any previous local file content.
-		self._tailing_via_adb: bool = False
 
 	# No app-level event filter required; handled inside CommConsole
 
@@ -1453,6 +1450,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Ensure command preview reflects current selections and reset live log buffer
 		self._update_command_preview()
 		self._raw_log_buffer = ""
+		# Also clear any pending local tail state so Show Log starts fresh
+		self._file_tail_path = None
+		self._file_tail_pos = 0
+		self._file_tail_rem = b""
 		cmd_line = self.command_preview.toPlainText().strip()
 		# If AAOS binary, execute via ADB instead of UART
 		if cmd_line.startswith("./android_stress_tool"):
@@ -1582,9 +1583,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		"""Start streaming the device log file into the app via adb tail -f."""
 		try:
 			self._stop_process()
-			# Mark AAOS tailing active and clear any previous live buffer
-			self._tailing_via_adb = True
-			self._raw_log_buffer = ""
 			self.process = QtCore.QProcess(self)
 			self.process.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 			self.process.readyReadStandardOutput.connect(self._on_process_output)
@@ -1600,8 +1598,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# Portable wait (first run) without requiring external tools; then follow from EOF
 			# so we do not include any previous run's content in the Show Log.
 			wait_and_tail = (
-				f"while [ ! -e \"{status_path}\" ]; do sleep 0.2; done; "
-				f"tail -n 0 -F \"{status_path}\" 2>/dev/null"
+				f"while [ ! -e \"{status_path}\" ]; do sleep 0.5; done; "
+				f"tail -n 0 -F \"{status_path}\""
 			)
 			args += ["shell", wait_and_tail]
 			self.process.start("adb", args)
@@ -1646,8 +1644,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.is_running = False
 		self._stop_process()
 		self._sample_timer.stop()
-		# Clear ADB tailing flag when process ends so Show Log can fallback
-		self._tailing_via_adb = False
 
 	def _on_process_output(self) -> None:
 		now = get_timestamp()
@@ -1925,26 +1921,39 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Load current content from in-memory buffer if available; otherwise try file
+		# Load initial snapshot:
+		# 1) Try remote AAOS file via adb cat (fast, current content)
+		# 2) Fallback to in-memory buffer
+		# 3) Fallback to current local tail file if any
+		_initial_set = False
 		try:
-			# If we are tailing via ADB, avoid preloading any existing local file
-			# content; only display what has streamed into the in-memory buffer.
-			if getattr(self, '_tailing_via_adb', False):
-				text.setPlainText(getattr(self, '_raw_log_buffer', ''))
-			else:
-				if hasattr(self, '_raw_log_buffer') and self._raw_log_buffer:
-					text.setPlainText(self._raw_log_buffer)
+			import subprocess
+			res = subprocess.run([
+				"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
+			], capture_output=True, text=True, timeout=3)
+			if res.returncode == 0 and (res.stdout or res.stderr):
+				text.setPlainText(res.stdout or res.stderr)
+				_initial_set = True
+		except Exception:
+			pass
+		if not _initial_set:
+			try:
+				buf = getattr(self, '_raw_log_buffer', '')
+				if buf:
+					text.setPlainText(buf)
+					_initial_set = True
 				else:
-					p = self.log_file_edit.text() if hasattr(self, 'log_file_edit') else ""
+					p = getattr(self, '_file_tail_path', None)
 					if p and os.path.exists(p):
 						with open(p, 'r', encoding='utf-8', errors='ignore') as f:
 							text.setPlainText(f.read())
-		except Exception:
-			pass
+						_initial_set = True
+			except Exception:
+				pass
 		# Live updates: reflect _raw_log_buffer into the dialog periodically
 		append_timer = QtCore.QTimer(d)
 		append_timer.setInterval(300)
-		_prev_len = {'n': 0}
+		_prev_len = {'n': len(getattr(self, '_raw_log_buffer', ''))}
 		def _pump():
 			try:
 				buf = getattr(self, '_raw_log_buffer', '')
