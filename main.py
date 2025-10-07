@@ -1591,7 +1591,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# single command string to `adb shell` (it will invoke /system/bin/sh -c
 			# '<cmd>'), so do not add an extra "sh -c" layer here.
 			status_path = "/tmp/android_stress_tool/stress_tool_status.txt"
-			wait_and_tail = f"while [ ! -e '{status_path}' ]; do sleep 0.5; done; tail -n +1 -f '{status_path}'"
+			# Portable wait (first run) without requiring external tools like seq; no extra sh -c layer.
+			wait_and_tail = (
+				f"echo '[log] waiting for {status_path}' ; "
+				f"for i in 1 2 3 4 5 6 7 8 9 10; do [ -e \"{status_path}\" ] && break; sleep 1; done; "
+				f"echo '[log] tailing {status_path}' ; "
+				f"tail -n +1 -F \"{status_path}\""
+			)
 			args += ["shell", wait_and_tail]
 			self.process.start("adb", args)
 			# don't wait; stream as available
