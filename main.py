@@ -713,7 +713,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			port = candidates[0]
 			ser = None
 			try:
-				ser = serial.Serial(port=port, baudrate=115200, timeout=1, write_timeout=2)
+				ser = serial.Serial(port=port, baudrate=921600, timeout=1, write_timeout=2)
 				# Send nproc and read back a line
 				ser.write(b"nproc\n")
 				time.sleep(0.5)
@@ -851,10 +851,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			return int(m.group(1)) if m else 1_000_000
 		candidates.sort(key=_com_num)
 		port = candidates[0]
-		# Try open at 115200; handle busy/denied
+		# Try open at 921600; handle busy/denied
 		ser = None
 		try:
-			ser = serial.Serial(port=port, baudrate=115200, timeout=1, write_timeout=3)
+			ser = serial.Serial(port=port, baudrate=921600, timeout=1, write_timeout=3)
 		except Exception as e:
 			msg = str(e)
 			if isinstance(e, PermissionError) or "denied" in msg.lower() or "busy" in msg.lower():
@@ -1496,13 +1496,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		connected = False
 		try:
 			if not self.comm_console.uart_connect_btn.isChecked() or (getattr(self.comm_console, '_current_port', '') or '') != linux_port:
-				connected = self.comm_console.connect_to_port(linux_port, baud=115200)
+				connected = self.comm_console.connect_to_port(linux_port, baud=921600)
 			else:
 				connected = True
 		except Exception:
 			connected = False
 		if not connected:
-			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 115200.")
+			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 921600.")
 			self._on_stop()
 			return
 		try:
