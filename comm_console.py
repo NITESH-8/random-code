@@ -215,12 +215,61 @@ class CommConsole(QtWidgets.QWidget):
 					self._cmd_placeholder.setVisible(False)
 			except Exception:
 				pass
-		# Toggle shared log/input visibility for CMD vs others
-		is_cmd = (idx == 3)
-		if hasattr(self, 'log'):
-			self.log.setVisible(not is_cmd)
-		if hasattr(self, 'input'):
-			self.input.setVisible(not is_cmd)
+		# Apply shared console visibility and focus handling
+		self._apply_protocol_ui_state(idx)
+
+	def _apply_protocol_ui_state(self, idx: int) -> None:
+		"""Show/hide the shared log/input and manage focus when switching.
+
+		This fixes a UI glitch where the shared console sometimes stays hidden
+		after returning from CMD. Force geometry updates so the widgets expand
+		back to their intended sizes.
+		"""
+		try:
+			is_cmd = (idx == 3)
+			if hasattr(self, 'log'):
+				self.log.setVisible(not is_cmd)
+			if hasattr(self, 'input'):
+				self.input.setVisible(not is_cmd)
+			# Resize behavior: for CMD let the stack expand; for others keep it compact
+			if hasattr(self, 'proto_stack'):
+				if is_cmd:
+					self.proto_stack.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+					self.proto_stack.setMinimumHeight(0)
+					self.proto_stack.setMaximumHeight(16777215)  # reset cap
+				else:
+					self.proto_stack.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+					current = self.proto_stack.currentWidget()
+					try:
+						h = current.sizeHint().height() if current is not None else self.proto_stack.sizeHint().height()
+						# Guard against zero-height hints
+						h = max(44, h)
+					except Exception:
+						h = 64
+					self.proto_stack.setMinimumHeight(h)
+					self.proto_stack.setMaximumHeight(h)
+				self.proto_stack.updateGeometry()
+				lay = self.layout()
+				if lay is not None:
+					lay.invalidate()
+			# When showing shared console again, ensure it regains space and focus
+			if not is_cmd and hasattr(self, 'log') and hasattr(self, 'input'):
+				self.log.setMinimumHeight(260)
+				self.log.updateGeometry()
+				self.input.setFixedHeight(60)
+				self.input.updateGeometry()
+				self.input.setFocus()
+			# When entering CMD, focus the first terminal input if available
+			if is_cmd:
+				try:
+					if getattr(self, 'cmd_terms', None):
+						term = self.cmd_terms[0]
+						if hasattr(term, 'input'):
+							term.input.setFocus()
+				except Exception:
+					pass
+		except Exception:
+			pass
 
 	def refresh_ports(self) -> None:
 		"""Refresh UART ports list."""
@@ -996,5 +1045,4 @@ class TerminalWidget(QtWidgets.QWidget):
 		except Exception:
 			pass
 		return super().eventFilter(source, event)
-
 
