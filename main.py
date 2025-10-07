@@ -631,32 +631,63 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		all matching PIDs to be safe. Errors are ignored silently.
 		"""
 		try:
-			import subprocess, shlex
-			# Elevate if possible
-			subprocess.run(["adb", "root"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
-			# Get process list and filter
-			ps = subprocess.run(["adb", "shell", "ps | grep android_stress_tool"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-			out = ps.stdout.strip()
-			if not out:
-				return
-			pids = []
-			for line in out.splitlines():
-				line = line.strip()
-				if not line or "grep android_stress_tool" in line:
-					continue
-				# Typical Android ps formats: user pid ... name  OR  USER PID PPID VSIZE RSS WCHAN ADDR S NAME
-				parts = line.split()
-				if len(parts) >= 2:
-					# Find first integer-like token as PID (usually index 1)
-					for tok in parts[1:3]:
-						try:
-							pids.append(str(int(tok)))
-							break
-						except Exception:
-							continue
+			import subprocess, re
+			def _adb(args, **kw):
+				return subprocess.run(["adb", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, **kw)
+			# Optional: mirror commands to CMD 2 for debugging
+			def _debug_log(line: str) -> None:
+				try:
+					if not hasattr(self, 'comm_console'):
+						return
+					# Ensure CMD terminals exist (lazy init on select)
+					try:
+						if not getattr(self.comm_console, 'cmd_terms', []):
+							self.comm_console.proto_combo.setCurrentIndex(3)
+							self.comm_console._on_proto_changed()
+					except Exception:
+						pass
+					terms = getattr(self.comm_console, 'cmd_terms', [])
+					if len(terms) >= 2:
+						term = terms[1]
+						if hasattr(term, 'view'):
+							term.view.appendPlainText(line)
+				except Exception:
+					pass
+			# Try to elevate
+			_debug_log("> adb root")
+			try:
+				root_res = _adb(["root"])  # ignore result
+				if root_res.stdout.strip():
+					_debug_log(root_res.stdout.strip())
+				if root_res.stderr.strip():
+					_debug_log(root_res.stderr.strip())
+			except Exception:
+				pass
+			# First try pidof (simplest)
+			_debug_log("> adb shell pidof android_stress_tool")
+			pid_res = _adb(["shell", "pidof android_stress_tool"])  # toybox/busybox
+			pids: list[str] = []
+			if pid_res.returncode == 0 and pid_res.stdout.strip():
+				pids = [p for p in pid_res.stdout.strip().split() if p.isdigit()]
+				_debug_log("pidof -> " + " ".join(pids))
+			# Fallback to ps | grep via sh -c
+			if not pids:
+				_debug_log("> adb shell sh -c 'ps | grep android_stress_tool | grep -v grep'")
+				ps_res = _adb(["shell", "sh", "-c", "ps | grep android_stress_tool | grep -v grep"]) 
+				out = ps_res.stdout.strip()
+				if out:
+					_debug_log(out)
+				for line in out.splitlines():
+					line = line.strip()
+					if not line:
+						continue
+					m = re.search(r"\b(\d{2,})\b", line)
+					if m:
+						pids.append(m.group(1))
 			# Kill all collected PIDs
 			for pid in pids:
-				subprocess.run(["adb", "shell", "kill", pid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+				_debug_log("> adb shell kill " + pid)
+				_adb(["shell", "kill", pid])
 		except Exception:
 			pass
 
@@ -1705,12 +1736,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._sample_timer.stop()
 		# No test mode
 		# Kill AAOS process if running (best-effort)
-	try:
-		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
-		if os_sel == "AAOS":
-			self._kill_android_stress_tool_via_adb()
-	except Exception:
-		pass
+		try:
+			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+			if os_sel == "AAOS":
+				self._kill_android_stress_tool_via_adb()
+		except Exception:
+			pass
 
 	def _on_process_finished(self) -> None:
 		self.is_running = False
