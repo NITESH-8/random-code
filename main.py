@@ -634,49 +634,20 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			import subprocess, re
 			def _adb(args, **kw):
 				return subprocess.run(["adb", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, **kw)
-			# Optional: mirror commands to CMD 2 for debugging
-			def _debug_log(line: str) -> None:
-				try:
-					if not hasattr(self, 'comm_console'):
-						return
-					# Ensure CMD terminals exist (lazy init on select)
-					try:
-						if not getattr(self.comm_console, 'cmd_terms', []):
-							self.comm_console.proto_combo.setCurrentIndex(3)
-							self.comm_console._on_proto_changed()
-					except Exception:
-						pass
-					terms = getattr(self.comm_console, 'cmd_terms', [])
-					if len(terms) >= 2:
-						term = terms[1]
-						if hasattr(term, 'view'):
-							term.view.appendPlainText(line)
-				except Exception:
-					pass
 			# Try to elevate
-			_debug_log("> adb root")
 			try:
-				root_res = _adb(["root"])  # ignore result
-				if root_res.stdout.strip():
-					_debug_log(root_res.stdout.strip())
-				if root_res.stderr.strip():
-					_debug_log(root_res.stderr.strip())
+				_adb(["root"])  # ignore result
 			except Exception:
 				pass
 			# First try pidof (simplest)
-			_debug_log("> adb shell pidof android_stress_tool")
 			pid_res = _adb(["shell", "pidof android_stress_tool"])  # toybox/busybox
 			pids: list[str] = []
 			if pid_res.returncode == 0 and pid_res.stdout.strip():
 				pids = [p for p in pid_res.stdout.strip().split() if p.isdigit()]
-				_debug_log("pidof -> " + " ".join(pids))
 			# Fallback to ps | grep via sh -c
 			if not pids:
-				_debug_log("> adb shell sh -c 'ps | grep android_stress_tool | grep -v grep'")
 				ps_res = _adb(["shell", "sh", "-c", "ps | grep android_stress_tool | grep -v grep"]) 
 				out = ps_res.stdout.strip()
-				if out:
-					_debug_log(out)
 				for line in out.splitlines():
 					line = line.strip()
 					if not line:
@@ -686,7 +657,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						pids.append(m.group(1))
 			# Kill all collected PIDs
 			for pid in pids:
-				_debug_log("> adb shell kill " + pid)
 				_adb(["shell", "kill", pid])
 		except Exception:
 			pass
