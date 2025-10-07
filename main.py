@@ -167,6 +167,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._blk_gpu_val: Optional[float] = None
 		# Raw log buffer used for Show Log (works for local tail and adb tail)
 		self._raw_log_buffer: str = ""
+		# Execution UI helpers
+		self._exec_info_msg: Optional[QtWidgets.QMessageBox] = None
+		self._exec_completed: bool = False
 
 	# No app-level event filter required; handled inside CommConsole
 
@@ -1468,6 +1471,20 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self._execute_test_via_adb(cmd_line, serial)
 			# Stream device status log into the app from /tmp/android_stress_tool/stress_tool_status.txt
 			self._start_adb_tail(serial)
+			# Show non-blocking info dialog and disable Execute while running
+			try:
+				self._exec_completed = False
+				self.btn_start.setEnabled(False)
+				self.btn_stop.setEnabled(True)
+				if self._exec_info_msg is None:
+					self._exec_info_msg = QtWidgets.QMessageBox(self)
+					self._exec_info_msg.setIcon(QtWidgets.QMessageBox.Information)
+					self._exec_info_msg.setWindowTitle("Executing")
+					self._exec_info_msg.setText("Execution in progress. Press Stop to terminate.")
+					self._exec_info_msg.setStandardButtons(QtWidgets.QMessageBox.NoButton)
+				self._exec_info_msg.show()
+			except Exception:
+				pass
 			# Auto-open Show Log so the user sees the device status immediately
 			try:
 				self._open_log_dialog()
@@ -1639,6 +1656,21 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Stop internal sampler
 		self._sample_timer.stop()
 		# No test mode
+		# Close any executing info message box
+		try:
+			if self._exec_info_msg is not None:
+				self._exec_info_msg.close()
+				self._exec_info_msg = None
+		except Exception:
+			pass
+		# If AAOS target, kill the running tool
+		try:
+			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+			if os_sel == "AAOS":
+				import subprocess
+				subprocess.Popen(["adb", "shell", "pkill", "android_stress_tool"], creationflags=0)
+		except Exception:
+			pass
 
 	def _on_process_finished(self) -> None:
 		self.is_running = False
@@ -1661,6 +1693,16 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._redraw_curve()
 		self._refresh_numeric_list()
 		self._update_export_enabled()
+		# If completion marker appears anywhere in buffer, re-enable Execute
+		try:
+			if "Stress test completed" in getattr(self, '_raw_log_buffer', ''):
+				self.btn_start.setEnabled(True)
+				self.btn_stop.setEnabled(False)
+				if self._exec_info_msg is not None:
+					self._exec_info_msg.close()
+					self._exec_info_msg = None
+		except Exception:
+			pass
 
 	def _try_parse_and_store(self, line: str, ts: float) -> None:
 		# Parse Linux stress tool output format
@@ -1921,41 +1963,18 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Clear buffer before showing to guarantee "fresh" view
-		self._raw_log_buffer = ""
-		# Load initial snapshot:
-		# 1) Try remote AAOS file via adb cat (fast, current content)
-		# 2) Fallback to in-memory buffer
-		# 3) Fallback to current local tail file if any
-		_initial_set = False
+		# Strict "new run only": do not preload from device or local file; rely on
+		# the live in-memory buffer which is cleared at Execute.
 		try:
-			import subprocess
-			res = subprocess.run([
-				"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
-			], capture_output=True, text=True, timeout=3)
-			if res.returncode == 0 and (res.stdout or res.stderr):
-				text.setPlainText(res.stdout or res.stderr)
-				_initial_set = True
+			buf = getattr(self, '_raw_log_buffer', '')
+			if buf:
+				text.setPlainText(buf)
 		except Exception:
 			pass
-		if not _initial_set:
-			try:
-				buf = getattr(self, '_raw_log_buffer', '')
-				if buf:
-					text.setPlainText(buf)
-					_initial_set = True
-				else:
-					p = getattr(self, '_file_tail_path', None)
-					if p and os.path.exists(p):
-						with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-							text.setPlainText(f.read())
-						_initial_set = True
-			except Exception:
-				pass
 		# Live updates: reflect _raw_log_buffer into the dialog periodically
 		append_timer = QtCore.QTimer(d)
 		append_timer.setInterval(300)
-		_prev_len = {'n': len(getattr(self, '_raw_log_buffer', ''))}
+		_prev_len = {'n': 0}
 		def _pump():
 			try:
 				buf = getattr(self, '_raw_log_buffer', '')
