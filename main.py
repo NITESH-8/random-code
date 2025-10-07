@@ -602,12 +602,17 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		for act in [a_start, a_stop, a_clear, a_sched, a_csv, a_png]:
 			toolbar.addAction(act)
 		# Tag important toolbar buttons for themed styling
+		# Keep references so we can enable/disable the visible toolbar buttons
+		self.action_execute = a_start
+		self.action_stop = a_stop
 		btn_exec = toolbar.widgetForAction(a_start)
 		if isinstance(btn_exec, QtWidgets.QToolButton):
 			btn_exec.setObjectName("btn_execute")
+			self.btn_execute_widget = btn_exec
 		btn_stop_w = toolbar.widgetForAction(a_stop)
 		if isinstance(btn_stop_w, QtWidgets.QToolButton):
 			btn_stop_w.setObjectName("btn_stop")
+			self.btn_stop_widget = btn_stop_w
 
 		# Push the theme toggle to the extreme right
 		spacer = QtWidgets.QWidget()
@@ -1478,9 +1483,16 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				pass
 			# Start schedule timer if there are scheduled changes
 			self._start_schedule_timer()
-			# Disable inputs while running
+			# Disable inputs while running (both action and toolbar button)
 			self.btn_start.setEnabled(False)
 			self.btn_stop.setEnabled(True)
+			try:
+				if hasattr(self, 'action_execute'):
+					self.action_execute.setEnabled(False)
+				if hasattr(self, 'action_stop'):
+					self.action_stop.setEnabled(True)
+			except Exception:
+				pass
 			self.duration_spin.setEnabled(False)
 			return
 		# Otherwise proceed with UART (Linux)
@@ -1534,6 +1546,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._start_schedule_timer()
 		self.btn_start.setEnabled(False)
 		self.btn_stop.setEnabled(True)
+		try:
+			if hasattr(self, 'action_execute'):
+				self.action_execute.setEnabled(False)
+			if hasattr(self, 'action_stop'):
+				self.action_stop.setEnabled(True)
+		except Exception:
+			pass
 		self.duration_spin.setEnabled(False)
 		# Command input removed
 
@@ -1638,6 +1657,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Re-enable inputs
 		self.btn_start.setEnabled(True)
 		self.btn_stop.setEnabled(False)
+		try:
+			if hasattr(self, 'action_execute'):
+				self.action_execute.setEnabled(True)
+			if hasattr(self, 'action_stop'):
+				self.action_stop.setEnabled(False)
+		except Exception:
+			pass
 		self.duration_spin.setEnabled(True)
 		# Stop internal sampler
 		self._sample_timer.stop()
@@ -1677,6 +1703,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			if "Stress test completed" in getattr(self, '_raw_log_buffer', ''):
 				self.btn_start.setEnabled(True)
 				self.btn_stop.setEnabled(False)
+				if hasattr(self, 'action_execute'):
+					self.action_execute.setEnabled(True)
+				if hasattr(self, 'action_stop'):
+					self.action_stop.setEnabled(False)
 		except Exception:
 			pass
 
