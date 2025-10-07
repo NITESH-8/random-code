@@ -605,6 +605,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		btn_exec = toolbar.widgetForAction(a_start)
 		if isinstance(btn_exec, QtWidgets.QToolButton):
 			btn_exec.setObjectName("btn_execute")
+			self.btn_execute_widget = btn_exec
+			self.btn_execute_widget.setToolTip("Execute Test")
 		btn_stop_w = toolbar.widgetForAction(a_stop)
 		if isinstance(btn_stop_w, QtWidgets.QToolButton):
 			btn_stop_w.setObjectName("btn_stop")
@@ -1471,18 +1473,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self._execute_test_via_adb(cmd_line, serial)
 			# Stream device status log into the app from /tmp/android_stress_tool/stress_tool_status.txt
 			self._start_adb_tail(serial)
-			# Show non-blocking info dialog and disable Execute while running
+			# Disable Execute and set helpful tooltip instead of a dialog
 			try:
 				self._exec_completed = False
 				self.btn_start.setEnabled(False)
 				self.btn_stop.setEnabled(True)
-				if self._exec_info_msg is None:
-					self._exec_info_msg = QtWidgets.QMessageBox(self)
-					self._exec_info_msg.setIcon(QtWidgets.QMessageBox.Information)
-					self._exec_info_msg.setWindowTitle("Executing")
-					self._exec_info_msg.setText("Execution in progress. Press Stop to terminate.")
-					self._exec_info_msg.setStandardButtons(QtWidgets.QMessageBox.NoButton)
-				self._exec_info_msg.show()
+				if hasattr(self, 'btn_execute_widget'):
+					self.btn_execute_widget.setToolTip("Execution in progress… Press Stop to terminate.")
 			except Exception:
 				pass
 			# Auto-open Show Log so the user sees the device status immediately
@@ -1656,11 +1653,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Stop internal sampler
 		self._sample_timer.stop()
 		# No test mode
-		# Close any executing info message box
+		# Restore tooltip on execute button
 		try:
-			if self._exec_info_msg is not None:
-				self._exec_info_msg.close()
-				self._exec_info_msg = None
+			if hasattr(self, 'btn_execute_widget'):
+				self.btn_execute_widget.setToolTip("Execute Test")
 		except Exception:
 			pass
 		# If AAOS target, kill the running tool
@@ -1698,9 +1694,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			if "Stress test completed" in getattr(self, '_raw_log_buffer', ''):
 				self.btn_start.setEnabled(True)
 				self.btn_stop.setEnabled(False)
-				if self._exec_info_msg is not None:
-					self._exec_info_msg.close()
-					self._exec_info_msg = None
+				if hasattr(self, 'btn_execute_widget'):
+					self.btn_execute_widget.setToolTip("Execute Test")
 		except Exception:
 			pass
 
