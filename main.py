@@ -1599,7 +1599,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# so we do not include any previous run's content in the Show Log.
 			wait_and_tail = (
 				f"while [ ! -e \"{status_path}\" ]; do sleep 0.5; done; "
-				f"tail -n 0 -F \"{status_path}\""
+				f"tail -n 0 -F \"{status_path}\" 2>/dev/null"
 			)
 			args += ["shell", wait_and_tail]
 			self.process.start("adb", args)
@@ -1921,6 +1921,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
+		# Clear buffer before showing to guarantee "fresh" view
+		self._raw_log_buffer = ""
 		# Load initial snapshot:
 		# 1) Try remote AAOS file via adb cat (fast, current content)
 		# 2) Fallback to in-memory buffer
