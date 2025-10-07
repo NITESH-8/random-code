@@ -624,6 +624,42 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		toolbar.addWidget(self.btn_theme)
 		# Remove text action toggle; handled by side handle now
 
+	def _kill_android_stress_tool_via_adb(self) -> None:
+		"""Run adb root, find android_stress_tool PID, and kill it.
+
+		We parse the output of `adb shell ps | grep android_stress_tool` and kill
+		all matching PIDs to be safe. Errors are ignored silently.
+		"""
+		try:
+			import subprocess, shlex
+			# Elevate if possible
+			subprocess.run(["adb", "root"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+			# Get process list and filter
+			ps = subprocess.run(["adb", "shell", "ps | grep android_stress_tool"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+			out = ps.stdout.strip()
+			if not out:
+				return
+			pids = []
+			for line in out.splitlines():
+				line = line.strip()
+				if not line or "grep android_stress_tool" in line:
+					continue
+				# Typical Android ps formats: user pid ... name  OR  USER PID PPID VSIZE RSS WCHAN ADDR S NAME
+				parts = line.split()
+				if len(parts) >= 2:
+					# Find first integer-like token as PID (usually index 1)
+					for tok in parts[1:3]:
+						try:
+							pids.append(str(int(tok)))
+							break
+						except Exception:
+							continue
+			# Kill all collected PIDs
+			for pid in pids:
+				subprocess.run(["adb", "shell", "kill", pid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+		except Exception:
+			pass
+
 	def _on_load_binary(self) -> None:
 		"""Auto-run UART workflow or AAOS ADB workflow based on target OS."""
 		try:
@@ -1669,13 +1705,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._sample_timer.stop()
 		# No test mode
 		# Kill AAOS process if running (best-effort)
-		try:
-			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
-			if os_sel == "AAOS":
-				import subprocess
-				subprocess.Popen(["adb", "shell", "pkill", "android_stress_tool"], creationflags=0)
-		except Exception:
-			pass
+	try:
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		if os_sel == "AAOS":
+			self._kill_android_stress_tool_via_adb()
+	except Exception:
+		pass
 
 	def _on_process_finished(self) -> None:
 		self.is_running = False
