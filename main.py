@@ -605,8 +605,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		btn_exec = toolbar.widgetForAction(a_start)
 		if isinstance(btn_exec, QtWidgets.QToolButton):
 			btn_exec.setObjectName("btn_execute")
-			self.btn_execute_widget = btn_exec
-			self.btn_execute_widget.setToolTip("Execute Test")
 		btn_stop_w = toolbar.widgetForAction(a_stop)
 		if isinstance(btn_stop_w, QtWidgets.QToolButton):
 			btn_stop_w.setObjectName("btn_stop")
@@ -1473,15 +1471,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self._execute_test_via_adb(cmd_line, serial)
 			# Stream device status log into the app from /tmp/android_stress_tool/stress_tool_status.txt
 			self._start_adb_tail(serial)
-			# Disable Execute and set helpful tooltip instead of a dialog
-			try:
-				self._exec_completed = False
-				self.btn_start.setEnabled(False)
-				self.btn_stop.setEnabled(True)
-				if hasattr(self, 'btn_execute_widget'):
-					self.btn_execute_widget.setToolTip("Execution in progress… Press Stop to terminate.")
-			except Exception:
-				pass
 			# Auto-open Show Log so the user sees the device status immediately
 			try:
 				self._open_log_dialog()
@@ -1653,13 +1642,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Stop internal sampler
 		self._sample_timer.stop()
 		# No test mode
-		# Restore tooltip on execute button
-		try:
-			if hasattr(self, 'btn_execute_widget'):
-				self.btn_execute_widget.setToolTip("Execute Test")
-		except Exception:
-			pass
-		# If AAOS target, kill the running tool
+		# Kill AAOS process if running (best-effort)
 		try:
 			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 			if os_sel == "AAOS":
@@ -1689,13 +1672,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._redraw_curve()
 		self._refresh_numeric_list()
 		self._update_export_enabled()
-		# If completion marker appears anywhere in buffer, re-enable Execute
+		# Re-enable Execute if completion text is seen in AAOS status file stream
 		try:
 			if "Stress test completed" in getattr(self, '_raw_log_buffer', ''):
 				self.btn_start.setEnabled(True)
 				self.btn_stop.setEnabled(False)
-				if hasattr(self, 'btn_execute_widget'):
-					self.btn_execute_widget.setToolTip("Execute Test")
 		except Exception:
 			pass
 
@@ -1958,18 +1939,41 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Strict "new run only": do not preload from device or local file; rely on
-		# the live in-memory buffer which is cleared at Execute.
+		# Clear buffer before showing to guarantee "fresh" view
+		self._raw_log_buffer = ""
+		# Load initial snapshot:
+		# 1) Try remote AAOS file via adb cat (fast, current content)
+		# 2) Fallback to in-memory buffer
+		# 3) Fallback to current local tail file if any
+		_initial_set = False
 		try:
-			buf = getattr(self, '_raw_log_buffer', '')
-			if buf:
-				text.setPlainText(buf)
+			import subprocess
+			res = subprocess.run([
+				"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
+			], capture_output=True, text=True, timeout=3)
+			if res.returncode == 0 and (res.stdout or res.stderr):
+				text.setPlainText(res.stdout or res.stderr)
+				_initial_set = True
 		except Exception:
 			pass
+		if not _initial_set:
+			try:
+				buf = getattr(self, '_raw_log_buffer', '')
+				if buf:
+					text.setPlainText(buf)
+					_initial_set = True
+				else:
+					p = getattr(self, '_file_tail_path', None)
+					if p and os.path.exists(p):
+						with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+							text.setPlainText(f.read())
+						_initial_set = True
+			except Exception:
+				pass
 		# Live updates: reflect _raw_log_buffer into the dialog periodically
 		append_timer = QtCore.QTimer(d)
 		append_timer.setInterval(300)
-		_prev_len = {'n': 0}
+		_prev_len = {'n': len(getattr(self, '_raw_log_buffer', ''))}
 		def _pump():
 			try:
 				buf = getattr(self, '_raw_log_buffer', '')
